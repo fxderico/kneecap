@@ -26,6 +26,12 @@ export class MediaManager {
 			id: generateUUID(),
 		};
 
+		// Captured BEFORE the append: canvas-aspect adoption below must know
+		// whether this import is the project's first visual asset.
+		const hadVisualMediaBefore = this.assets.some(
+			(existing) => existing.type === "video" || existing.type === "image",
+		);
+
 		this.assets = [...this.assets, newAsset];
 		this.notify();
 
@@ -33,6 +39,10 @@ export class MediaManager {
 			await storageService.saveMediaAsset({ projectId, mediaAsset: newAsset });
 			this.editor.project.ratchetFpsForImportedMedia({
 				importedAssets: [newAsset],
+			});
+			this.editor.project.adoptCanvasAspectForImportedMedia({
+				importedAssets: [newAsset],
+				hadVisualMediaBefore,
 			});
 			return newAsset;
 		} catch (error) {

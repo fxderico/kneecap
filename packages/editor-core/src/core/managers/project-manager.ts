@@ -13,7 +13,11 @@ import { toast } from "@/core/notifications";
 import { generateUUID } from "@/utils/id";
 import { UpdateProjectSettingsCommand } from "@/commands/project";
 import { DEFAULT_BACKGROUND_COLOR } from "@/background/color";
-import { DEFAULT_CANVAS_SIZE } from "@/canvas/sizes";
+import {
+	DEFAULT_CANVAS_SIZE,
+	getAdoptedCanvasSizeForImportedMedia,
+} from "@/canvas/sizes";
+import type { TCanvasSize } from "@/project/types";
 import { DEFAULT_FPS } from "@/fps/defaults";
 import { buildDefaultScene, getProjectDurationFromScenes } from "@/timeline/scenes";
 import { buildScene } from "@/services/renderer/scene-builder";
@@ -518,6 +522,33 @@ export class ProjectManager {
 
 		new UpdateProjectSettingsCommand({ fps: nextFps }).execute();
 		return nextFps;
+	}
+
+	/**
+	 * Same seam as the fps ratchet above, for the canvas: the first visual
+	 * asset imported into an untouched factory-default project sets the
+	 * canvas aspect (see getAdoptedCanvasSizeForImportedMedia for the exact
+	 * guards). Returns the adopted size, or null when nothing changed.
+	 */
+	adoptCanvasAspectForImportedMedia({
+		importedAssets,
+		hadVisualMediaBefore,
+	}: {
+		importedAssets: Array<Pick<MediaAsset, "type" | "width" | "height">>;
+		hadVisualMediaBefore: boolean;
+	}): TCanvasSize | null {
+		if (!this.active) return null;
+
+		const adopted = getAdoptedCanvasSizeForImportedMedia({
+			currentSize: this.active.settings.canvasSize,
+			currentMode: this.active.settings.canvasSizeMode,
+			hadVisualMediaBefore,
+			importedAssets,
+		});
+		if (adopted === null) return null;
+
+		new UpdateProjectSettingsCommand({ canvasSize: adopted }).execute();
+		return adopted;
 	}
 
 	async updateThumbnail({ thumbnail }: { thumbnail: string }): Promise<void> {

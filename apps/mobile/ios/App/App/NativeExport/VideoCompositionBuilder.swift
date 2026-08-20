@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreGraphics
+import CoreImage
 
 /// kneecap M9 — assembles the `AVMutableVideoComposition` from a
 /// `BuiltComposition` (plan M9 items 1-3): renders every main-track segment
@@ -30,6 +31,8 @@ public enum VideoCompositionBuilder {
 		}
 		var clipById: [String: EdlClip] = [:]
 		for c in mainTrack.clips { clipById[c.clipId] = c }
+		var assetById: [String: EdlAsset] = [:]
+		for a in edl.assets { assetById[a.assetId] = a }
 
 		func enabledBrightness(_ clipId: String) -> Double? {
 			guard let clip = clipById[clipId] else { return nil }
@@ -37,6 +40,30 @@ public enum VideoCompositionBuilder {
 			let amount = fx.params["amount"]?.asDouble ?? 0
 			return max(-1, min(1, amount))
 		}
+
+		/// Preview-parity source placement for a main-track clip: its EDL
+		/// transform plus the asset's container rotation (the compositor gets
+		/// RAW decoded buffers — `preferredTransform` does not apply there).
+		func sourcePlacement(_ clipId: String) -> SourcePlacement {
+			guard let clip = clipById[clipId] else { return .identity }
+			let rotation = clip.assetId.flatMap { assetById[$0]?.rotationDegrees } ?? 0
+			return SourcePlacement(
+				transform: clip.transform,
+				rotationDegrees: rotation,
+				opacity: clip.opacity
+			)
+		}
+
+		// Canvas background behind every placed frame — flat EDL color, or
+		// opaque black for any background type v1 cannot reproduce natively.
+		let backgroundColor: CIColor = {
+			guard edl.meta.background.type == "color",
+				  let hex = edl.meta.background.color,
+				  let parsed = Self.ciColor(fromHex: hex) else {
+				return CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+			}
+			return parsed
+		}()
 
 		// --- Build the sorted, contiguous instruction segments ---
 		struct Segment {
@@ -53,7 +80,9 @@ public enum VideoCompositionBuilder {
 			let instruction = EdlVideoCompositionInstruction(
 				timeRange: range,
 				primaryTrackID: trackID,
-				primaryBrightness: enabledBrightness(placement.clipId)
+				primaryBrightness: enabledBrightness(placement.clipId),
+				primaryPlacement: sourcePlacement(placement.clipId),
+				backgroundColor: backgroundColor
 			)
 			segments.append(Segment(startTicks: solo.start, endTicks: solo.end, instruction: instruction))
 		}
@@ -74,7 +103,10 @@ public enum VideoCompositionBuilder {
 				transitionWindowDuration: range.duration,
 				transitionKind: window.kind,
 				primaryBrightness: enabledBrightness(outgoingId),
-				secondaryBrightness: enabledBrightness(incomingId)
+				secondaryBrightness: enabledBrightness(incomingId),
+				primaryPlacement: sourcePlacement(outgoingId),
+				secondaryPlacement: sourcePlacement(incomingId),
+				backgroundColor: backgroundColor
 			)
 			segments.append(Segment(startTicks: window.startTicks, endTicks: window.endTicks, instruction: instruction))
 		}
@@ -115,5 +147,23 @@ public enum VideoCompositionBuilder {
 		}
 
 		return composition
+	}
+
+	/// Parses `#RGB` / `#RRGGBB` (the EDL's flat-color background format)
+	/// into an opaque CIColor. Returns nil for anything unparseable so the
+	/// caller can fall back to black rather than guessing.
+	static func ciColor(fromHex hex: String) -> CIColor? {
+		var value = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+		if value.hasPrefix("#") { value.removeFirst() }
+		if value.count == 3 {
+			value = value.map { "\($0)\($0)" }.joined()
+		}
+		guard value.count == 6, let rgb = UInt32(value, radix: 16) else { return nil }
+		return CIColor(
+			red: CGFloat((rgb >> 16) & 0xff) / 255,
+			green: CGFloat((rgb >> 8) & 0xff) / 255,
+			blue: CGFloat(rgb & 0xff) / 255,
+			alpha: 1
+		)
 	}
 }

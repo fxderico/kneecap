@@ -20,6 +20,38 @@ import CoreImage
 /// afterward via `AVVideoCompositionCoreAnimationTool`
 /// (`OverlayLayerBuilder.swift`), which Apple's docs confirm layers on top
 /// of whatever `customVideoCompositorClass` produces.
+/// Geometry for placing one source's decoded frames into the render frame —
+/// the custom-compositor equivalent of the preview renderer's
+/// `computeVisualTransform` (`frame-descriptor.ts`), carrying the SAME EDL
+/// clip transform plus the asset's container rotation. Custom compositors
+/// receive RAW decoded buffers: AVFoundation applies neither the track's
+/// `preferredTransform` nor any fitting, so before this existed a source
+/// whose coded size differed from `renderSize` rendered un-scaled at the
+/// buffer's bottom-left (Core Image's origin) with black everywhere else —
+/// the "video only fills the bottom-left quarter" export bug.
+public struct SourcePlacement {
+	/// EDL clip transform, authored in the preview's screen convention:
+	/// position offsets from canvas center, +Y DOWN, rotation clockwise.
+	public let transform: EdlTransform
+	/// Container display rotation (0|90|180|270, from `EdlAsset
+	/// .rotationDegrees` == MediaProbe's preferredTransform decode) that
+	/// uprights the coded frame.
+	public let rotationDegrees: Int
+	public let opacity: Double
+
+	public init(transform: EdlTransform, rotationDegrees: Int, opacity: Double) {
+		self.transform = transform
+		self.rotationDegrees = rotationDegrees
+		self.opacity = opacity
+	}
+
+	public static let identity = SourcePlacement(
+		transform: EdlTransform(positionX: 0, positionY: 0, scaleX: 1, scaleY: 1, rotateDegrees: 0),
+		rotationDegrees: 0,
+		opacity: 1
+	)
+}
+
 public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol {
 	public var timeRange: CMTimeRange
 	public var enablePostProcessing: Bool = false
@@ -54,6 +86,14 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 	/// frames, which is the overwhelming majority of any real timeline.
 	public let primaryBrightness: Double?
 	public let secondaryBrightness: Double?
+	/// Placement of each source into the render frame (preview-parity fit +
+	/// clip transform). Defaults to `.identity` (center, contain-fit only)
+	/// so a caller that has no EDL context still gets a full-frame result.
+	public let primaryPlacement: SourcePlacement
+	public let secondaryPlacement: SourcePlacement
+	/// Canvas background the sources composite over (EDL `meta.background`
+	/// when it is a flat color; opaque black otherwise/by default).
+	public let backgroundColor: CIColor
 
 	init(
 		timeRange: CMTimeRange,
@@ -63,7 +103,10 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		transitionWindowDuration: CMTime? = nil,
 		transitionKind: String? = nil,
 		primaryBrightness: Double? = nil,
-		secondaryBrightness: Double? = nil
+		secondaryBrightness: Double? = nil,
+		primaryPlacement: SourcePlacement = .identity,
+		secondaryPlacement: SourcePlacement = .identity,
+		backgroundColor: CIColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1)
 	) {
 		self.timeRange = timeRange
 		self.primaryTrackID = primaryTrackID
@@ -73,6 +116,9 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		self.transitionKind = transitionKind
 		self.primaryBrightness = primaryBrightness
 		self.secondaryBrightness = secondaryBrightness
+		self.primaryPlacement = primaryPlacement
+		self.secondaryPlacement = secondaryPlacement
+		self.backgroundColor = backgroundColor
 		self.containsTweening = secondaryTrackID != kCMPersistentTrackID_Invalid
 		// `requiredSourceTrackIDs` is typed `[NSValue]?`, but AVFoundation's
 		// OWN validation (`-[AVVideoComposition
@@ -132,10 +178,26 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 				return
 			}
 
+			// The render frame is renderContext.size (== composition.renderSize),
+			// NOT the source buffer's size — conflating the two is the original
+			// bottom-left-quarter bug this placement pass exists to fix.
+			let renderSize = renderContextQueue.sync { renderContext?.size } ?? .zero
+			guard renderSize.width > 0, renderSize.height > 0 else {
+				asyncVideoCompositionRequest.finish(with: TransitionCompositorError.missingOutputPixelBuffer)
+				return
+			}
+			let renderRect = CGRect(origin: .zero, size: renderSize)
+			let background = CIImage(color: instruction.backgroundColor).cropped(to: renderRect)
+
 			var image = CIImage(cvPixelBuffer: primaryBuffer)
 			if let brightness = instruction.primaryBrightness {
 				image = image.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
 			}
+			image = Self.place(
+				image: image,
+				placement: instruction.primaryPlacement,
+				renderSize: renderSize
+			).composited(over: background)
 
 			if instruction.secondaryTrackID != kCMPersistentTrackID_Invalid,
 			   let secondaryBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: instruction.secondaryTrackID) {
@@ -143,6 +205,11 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 				if let brightness = instruction.secondaryBrightness {
 					secondaryImage = secondaryImage.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
 				}
+				secondaryImage = Self.place(
+					image: secondaryImage,
+					placement: instruction.secondaryPlacement,
+					renderSize: renderSize
+				).composited(over: background)
 				let progress = Self.progress(
 					at: asyncVideoCompositionRequest.compositionTime,
 					windowStart: instruction.transitionWindowStart ?? .zero,
@@ -160,8 +227,78 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 				asyncVideoCompositionRequest.finish(with: TransitionCompositorError.missingOutputPixelBuffer)
 				return
 			}
-			ciContext.render(image, to: outputBuffer)
+			ciContext.render(image.cropped(to: renderRect), to: outputBuffer)
 			asyncVideoCompositionRequest.finish(withComposedVideoFrame: outputBuffer)
+		}
+	}
+
+	/// Preview-parity placement — the Core Image mirror of the web renderer's
+	/// `computeVisualTransform` (frame-descriptor.ts):
+	///
+	///   1. upright the coded frame per the container rotation (custom
+	///      compositors get RAW buffers; `preferredTransform` is NOT applied);
+	///   2. contain-fit the upright frame into the render size
+	///      (`min(rw/uw, rh/uh)` — same rule as preview);
+	///   3. apply the clip transform: scale (negative = flip, same as
+	///      preview's signed-scale convention), rotation, and center offset.
+	///
+	/// Coordinate care: the EDL transform is authored in the preview's
+	/// screen space (origin top-left, +Y down, clockwise-positive rotation);
+	/// Core Image is origin bottom-left, +Y up — so positionY and the
+	/// rotation sign flip here, ONCE, in this one function.
+	static func place(image: CIImage, placement: SourcePlacement, renderSize: CGSize) -> CIImage {
+		var result = image
+
+		if let orientation = Self.orientation(fromRotationDegrees: placement.rotationDegrees) {
+			result = result.oriented(orientation)
+		}
+		// Normalize the (possibly oriented) extent back to a zero origin so
+		// the center-anchored transform below starts from a known frame.
+		let extent = result.extent
+		if extent.origin != .zero {
+			result = result.transformed(by: CGAffineTransform(
+				translationX: -extent.origin.x,
+				y: -extent.origin.y
+			))
+		}
+
+		let uprightWidth = result.extent.width
+		let uprightHeight = result.extent.height
+		guard uprightWidth > 0, uprightHeight > 0 else { return result }
+
+		let contain = min(renderSize.width / uprightWidth, renderSize.height / uprightHeight)
+		let scaleX = contain * CGFloat(placement.transform.scaleX)
+		let scaleY = contain * CGFloat(placement.transform.scaleY)
+		let centerX = renderSize.width / 2 + CGFloat(placement.transform.positionX)
+		let centerY = renderSize.height / 2 - CGFloat(placement.transform.positionY) // +Y down -> +Y up
+		let rotation = -CGFloat(placement.transform.rotateDegrees) * .pi / 180 // CW screen -> CCW-positive CI
+
+		// Applied to each point LAST-first: center the frame on the origin,
+		// scale, rotate, then translate the origin to the target center.
+		var transform = CGAffineTransform.identity
+		transform = transform.translatedBy(x: centerX, y: centerY)
+		transform = transform.rotated(by: rotation)
+		transform = transform.scaledBy(x: scaleX, y: scaleY)
+		transform = transform.translatedBy(x: -uprightWidth / 2, y: -uprightHeight / 2)
+		result = result.transformed(by: transform)
+
+		if placement.opacity < 1 {
+			result = result.applyingFilter("CIColorMatrix", parameters: [
+				"inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(max(0, placement.opacity))),
+			])
+		}
+		return result
+	}
+
+	/// EXIF orientation equivalent of the container's display rotation.
+	/// `nil` for 0 (and any non-canonical value — MediaProbe only ever emits
+	/// 0/90/180/270) so the common unrotated case skips the pass entirely.
+	static func orientation(fromRotationDegrees degrees: Int) -> CGImagePropertyOrientation? {
+		switch degrees {
+		case 90: return .right
+		case 180: return .down
+		case 270: return .left
+		default: return nil
 		}
 	}
 

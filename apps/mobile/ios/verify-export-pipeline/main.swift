@@ -297,6 +297,45 @@ Task {
 			check(!FileManager.default.fileExists(atPath: cancelOutputURL.path), "no partial file left behind after cancellation")
 		}
 
+		print("== 9. Placement/aspect check: landscape source into a PORTRAIT canvas fills the frame width, centered (the bottom-left-quarter export bug's regression test) ==")
+		// Same fixture timeline, but the canvas/output is portrait 540x960.
+		// The 960x540 source must be contain-fit: scaled to 540x304 (x0.5625)
+		// and CENTERED — content band in the vertical middle spanning the full
+		// width, with near-black letterbox bands above AND below. The old
+		// unplaced compositor rendered the frame at the buffer's bottom-left
+		// instead (bright bottom band, dark top ~2/3), which these checks
+		// fail loudly.
+		var portraitEdlJson = edlJson
+		var portraitMeta = portraitEdlJson["meta"] as! [String: Any]
+		portraitMeta["canvas"] = ["width": 540, "height": 960]
+		portraitEdlJson["meta"] = portraitMeta
+		var portraitOutput = portraitEdlJson["output"] as! [String: Any]
+		portraitOutput["resolution"] = ["width": 540, "height": 960]
+		portraitEdlJson["output"] = portraitOutput
+
+		let portraitEdl = try EdlDecoder.decode(jsObject: portraitEdlJson)
+		let portraitURL = workDir.appendingPathComponent("portrait.mp4")
+		let portraitResult = try await EdlExporter.export(
+			edl: portraitEdl,
+			resolveAssetURL: { _ in fixtureURL },
+			outputURL: portraitURL,
+			onProgress: { _ in }
+		)
+		check(portraitResult.width == 540 && portraitResult.height == 960, "portrait export dims == 540x960 (got \(portraitResult.width)x\(portraitResult.height))")
+
+		let portraitFrame = try extractFrame(from: portraitURL, at: 1.0)
+		// Expected geometry: content rows [328, 632) of 960 (centered 304-row
+		// band). Sample well inside each region to be codec/rounding-safe.
+		let topBand = meanBrightness(portraitFrame, xFraction: 0.0..<1.0, yFraction: 0.02..<0.30)
+		let bottomBand = meanBrightness(portraitFrame, xFraction: 0.0..<1.0, yFraction: 0.70..<0.98)
+		let midLeft = meanBrightness(portraitFrame, xFraction: 0.02..<0.48, yFraction: 0.40..<0.60)
+		let midRight = meanBrightness(portraitFrame, xFraction: 0.52..<0.98, yFraction: 0.40..<0.60)
+		print("  brightness: top=\(String(format: "%.2f", topBand)) bottom=\(String(format: "%.2f", bottomBand)) midLeft=\(String(format: "%.2f", midLeft)) midRight=\(String(format: "%.2f", midRight))")
+		check(topBand < 6.0, "top letterbox band is near-black (got \(topBand))")
+		check(bottomBand < 6.0, "bottom letterbox band is near-black — the OLD bug put the video here (got \(bottomBand))")
+		check(midLeft > 10.0, "centered band has real content on the LEFT half (got \(midLeft))")
+		check(midRight > 10.0, "centered band has real content on the RIGHT half — the OLD bug left this black (got \(midRight))")
+
 		print("\nALL CHECKS PASSED")
 		exitCode = 0
 	} catch {
@@ -353,6 +392,26 @@ func meanAbsDiff(_ a: RGBAFrame, _ b: RGBAFrame) -> Double {
 				total += abs(Double(a.bytes[idx + c]) - Double(b.bytes[idx + c]))
 				count += 1
 			}
+		}
+	}
+	return count > 0 ? total / count : 0
+}
+
+/// Mean R+G+B brightness (0-255) over a fractional sub-rectangle of the
+/// frame, sampled every 2nd pixel — used by the placement checks to tell
+/// letterbox bands (near 0) from content bands.
+func meanBrightness(_ frame: RGBAFrame, xFraction: Range<Double>, yFraction: Range<Double>) -> Double {
+	let x0 = max(0, Int(Double(frame.width) * xFraction.lowerBound))
+	let x1 = min(frame.width, Int(Double(frame.width) * xFraction.upperBound))
+	let y0 = max(0, Int(Double(frame.height) * yFraction.lowerBound))
+	let y1 = min(frame.height, Int(Double(frame.height) * yFraction.upperBound))
+	var total: Double = 0
+	var count: Double = 0
+	for y in Swift.stride(from: y0, to: y1, by: 2) {
+		for x in Swift.stride(from: x0, to: x1, by: 2) {
+			let idx = (y * frame.width + x) * 4
+			total += (Double(frame.bytes[idx]) + Double(frame.bytes[idx + 1]) + Double(frame.bytes[idx + 2])) / 3
+			count += 1
 		}
 	}
 	return count > 0 ? total / count : 0
