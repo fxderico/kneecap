@@ -448,7 +448,16 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 			)}
 
 			{activeSheet === "captions" && (
-				<CaptionsPanel editor={editor} onClose={closeSheet} onInserted={(ref) => selectElement({ editor, ref })} />
+				<CaptionsPanel
+					editor={editor}
+					onClose={closeSheet}
+					onInserted={(ref) => selectElement({ editor, ref })}
+					selectedCaption={
+						selectedRef && selectedElement?.type === "caption"
+							? { ref: selectedRef, element: selectedElement }
+							: null
+					}
+				/>
 			)}
 
 			{activeSheet === "ratio" && (

@@ -8,7 +8,7 @@
  * (see `@kneecap/editor-core/react`'s own header comment).
  */
 import type { EditorCore, MediaAsset, MediaType, TCanvasSize } from "@kneecap/editor-core";
-import type { ElementRef, RetimeConfig, TimelineElement } from "@kneecap/editor-core/timeline";
+import type { CaptionWord, ElementRef, RetimeConfig, TimelineElement } from "@kneecap/editor-core/timeline";
 import type { ParamValues } from "@kneecap/editor-core/params";
 import {
 	DeleteElementsCommand,
@@ -34,6 +34,7 @@ import {
 } from "@kneecap/editor-core/timeline";
 import { registerDefaultGraphics } from "@kneecap/editor-core/graphics";
 import { buildElementFromMedia } from "@kneecap/editor-core/timeline";
+import { rewriteCaptionWords } from "./caption-text";
 import { getNativeBridge } from "@kneecap/native-bridge";
 import {
 	importMediaFromNative,
@@ -120,6 +121,33 @@ export function deleteSelected({ editor, refs }: { editor: EditorCore; refs: Ele
 
 export function duplicateSelected({ editor, refs }: { editor: EditorCore; refs: ElementRef[] }): void {
 	editor.command.execute({ command: new DuplicateElementsCommand({ elements: refs }) });
+}
+
+/** Round 21.4 — caption text edited as a plain string (see
+ *  caption-text.ts for the timing-preserving rewrite rules). One undoable
+ *  UpdateElementsCommand per change, same as every style row. */
+export function setCaptionText({
+	editor,
+	ref,
+	words,
+	text,
+}: {
+	editor: EditorCore;
+	ref: ElementRef;
+	words: readonly CaptionWord[];
+	text: string;
+}): void {
+	editor.command.execute({
+		command: new UpdateElementsCommand({
+			updates: [
+				{
+					trackId: ref.trackId,
+					elementId: ref.elementId,
+					patch: { words: rewriteCaptionWords({ words, newText: text }) },
+				},
+			],
+		}),
+	});
 }
 
 export function setElementParam({

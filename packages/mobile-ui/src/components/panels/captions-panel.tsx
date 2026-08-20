@@ -7,8 +7,14 @@ import type { EditorCore } from "@kneecap/editor-core";
 import type { ElementRef } from "@kneecap/editor-core/timeline";
 import { CAPTION_STYLE_PRESETS, DEFAULT_CAPTION_STYLE_PRESET_ID } from "@kneecap/editor-core/captions";
 import { generateCaptions, applyCaptionStyleToAll } from "../../editor/captions-actions";
+import { setCaptionText } from "../../editor/actions";
+import { captionText } from "../../editor/caption-text";
+import type { CaptionElement } from "@kneecap/editor-core/timeline";
 
 interface CaptionsPanelProps {
+	/** The selected caption element, when one is selected — drives the
+	 *  text-field editor below (round 21.4). */
+	selectedCaption?: { ref: ElementRef; element: CaptionElement } | null;
 	editor: EditorCore;
 	onClose: () => void;
 	onInserted: (ref: ElementRef) => void;
@@ -45,10 +51,15 @@ type GenerateState = "idle" | "generating" | "done" | "error";
  * exists in editor-core but has no UI control here yet). Both are
  * disclosed below, not hidden.
  */
-export function CaptionsPanel({ editor, onClose, onInserted }: CaptionsPanelProps) {
+export function CaptionsPanel({ editor, onClose, onInserted, selectedCaption }: CaptionsPanelProps) {
 	const [language, setLanguage] = useState("auto");
 	const [stylePreset, setStylePreset] = useState(DEFAULT_CAPTION_STYLE_PRESET_ID);
 	const [state, setState] = useState<GenerateState>("idle");
+	// Local draft for the caption-text field: committing rewrites words and
+	// re-deriving the value from them normalizes whitespace, which ate the
+	// space key mid-typing (caught live in the harness). The draft holds
+	// exactly what the user typed; the engine stores the tokenized words.
+	const [captionDraft, setCaptionDraft] = useState<{ id: string; text: string } | null>(null);
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
 	const handleGenerate = () => {
@@ -73,6 +84,32 @@ export function CaptionsPanel({ editor, onClose, onInserted }: CaptionsPanelProp
 				Generate transcribes your clip&apos;s audio on this device (zero network, zero cloud)
 				— the selected clip, or the first clip on the main track. Trims are respected.
 			</p>
+			{selectedCaption && (
+				<div className="cc-param-row">
+					<div className="cc-param-row__head">
+						<span className="cc-param-row__label">Caption text</span>
+					</div>
+					<textarea
+						className="cc-text-content-input"
+						rows={2}
+						value={
+							captionDraft?.id === selectedCaption.ref.elementId
+								? captionDraft.text
+								: captionText(selectedCaption.element.words)
+						}
+						aria-label="Caption text"
+						onChange={(event) => {
+							setCaptionDraft({ id: selectedCaption.ref.elementId, text: event.target.value });
+							setCaptionText({
+								editor,
+								ref: selectedCaption.ref,
+								words: selectedCaption.element.words,
+								text: event.target.value,
+							});
+						}}
+					/>
+				</div>
+			)}
 			<button
 				type="button"
 				className="cc-panel-actions__btn"

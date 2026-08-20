@@ -15,6 +15,7 @@ import { ImageNode } from "../nodes/image-node";
 import { RootNode } from "../nodes/root-node";
 import { StickerNode } from "../nodes/sticker-node";
 import { renderTextToContext, TextNode } from "../nodes/text-node";
+import { CaptionNode, renderCaptionToContext } from "../nodes/caption-node";
 import { VideoNode } from "../nodes/video-node";
 import type { ResolvedVisualSourceNodeState } from "../nodes/visual-node";
 import type {
@@ -202,7 +203,70 @@ async function collectNode({
 			items,
 			textures,
 		});
+		return;
 	}
+
+	// Round 21.4 (founder: captions "not showing up overlayed as text on the
+	// video"): caption elements resolved every frame (resolve.ts) and were
+	// then silently DROPPED here — every node type except CaptionNode had a
+	// collector. Same rasterize-to-texture path as text.
+	if (node instanceof CaptionNode) {
+		collectCaptionNode({
+			node,
+			renderer,
+			path,
+			items,
+			textures,
+		});
+	}
+}
+
+function collectCaptionNode({
+	node,
+	renderer,
+	path,
+	items,
+	textures,
+}: {
+	node: CaptionNode;
+	renderer: CanvasRenderer;
+	path: string;
+	items: FrameItemDescriptor[];
+	textures: Map<string, TextureUploadDescriptor>;
+}) {
+	if (!node.resolved || !node.resolved.line) {
+		return;
+	}
+
+	const textureId = `${path}:caption`;
+	const { width, height } = renderer;
+	// Same caching rationale as collectTextNode: params + resolved fully
+	// determine the raster; hashing them beats re-rasterizing every frame.
+	// The resolved line changes as the karaoke highlight advances, so the
+	// hash naturally invalidates per active word, not per frame.
+	const contentHash = `caption:${width}x${height}:${JSON.stringify({
+		params: node.params,
+		resolved: node.resolved,
+	})}`;
+	textures.set(textureId, {
+		kind: "rendered",
+		id: textureId,
+		contentHash,
+		width,
+		height,
+		draw: (ctx) => {
+			renderCaptionToContext({ node, ctx });
+		},
+	});
+	items.push({
+		type: "layer",
+		textureId,
+		transform: fullCanvasTransform(renderer),
+		opacity: node.resolved.opacity,
+		blendMode: node.params.blendMode ?? "normal",
+		effectPassGroups: node.resolved.effectPasses,
+		mask: null,
+	});
 }
 
 async function collectVisualSourceNode({

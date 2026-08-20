@@ -41,6 +41,31 @@ const KNEECAP_CYAN = "#00CAE0";
 
 export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 	{
+		id: "simple",
+		name: "Simple",
+		// Round 21.4, founder: "look at how publikclip renders simple
+		// captions — SIMPLE SETTING, for video inspiration." This is
+		// publikclip's own `classic` ASS preset ported to caption params
+		// (~/publikclip pipeline/captions/ass.py): bold white words, thick
+		// black outline, GOLD active word, bottom, sentence case, karaoke.
+		params: {
+			fontFamily: "Arial",
+			fontSize: 24,
+			fontWeight: "bold",
+			color: "#ffffff",
+			highlightColor: "#FFD700",
+			strokeColor: "#000000",
+			strokeWidth: 6,
+			"background.enabled": false,
+			"background.color": "#000000",
+			"activeWordBackground.enabled": false,
+			"activeWordBackground.color": "#FFD700",
+			position: "bottom" satisfies CaptionPosition,
+			uppercase: false,
+			animationStyle: "karaoke" satisfies CaptionAnimationStyle,
+		},
+	},
+	{
 		id: "classic",
 		name: "Classic",
 		params: {
@@ -122,7 +147,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 	},
 ] as const;
 
-export const DEFAULT_CAPTION_STYLE_PRESET_ID = "classic";
+export const DEFAULT_CAPTION_STYLE_PRESET_ID = "simple";
 
 export function getCaptionStylePreset({
 	id,
