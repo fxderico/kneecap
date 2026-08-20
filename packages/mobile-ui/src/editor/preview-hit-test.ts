@@ -87,6 +87,7 @@ export function pointInElement({
 	canvasHeight,
 	x,
 	y,
+	fallbackToFullFrame = true,
 }: {
 	element: TimelineElement;
 	mediaById: Map<string, MediaAsset>;
@@ -94,8 +95,26 @@ export function pointInElement({
 	canvasHeight: number;
 	x: number;
 	y: number;
+	/** When true, an element whose source dimensions can't be resolved
+	 *  (asset record without probe data, sticker without intrinsic dims)
+	 *  tests against a full-frame quad instead of becoming untouchable.
+	 *  `hitTestPreview` runs a PRECISE pass first with this off — caught
+	 *  live in the web harness: a dimension-less sticker's full-frame
+	 *  fallback quad stole every touch from the precisely-bounded elements
+	 *  underneath it. */
+	fallbackToFullFrame?: boolean;
 }): boolean {
-	const source = sourceSizeFor({ element, mediaById });
+	let source = sourceSizeFor({ element, mediaById });
+	if (
+		!source &&
+		fallbackToFullFrame &&
+		(element.type === "video" ||
+			element.type === "image" ||
+			element.type === "sticker" ||
+			element.type === "graphic")
+	) {
+		source = { width: canvasWidth, height: canvasHeight };
+	}
 	if (!source) return false;
 
 	const transform = transformFromParams(element.params);
@@ -168,29 +187,36 @@ export function hitTestPreview({
 		editor.media.getAssets().map((asset) => [asset.id, asset]),
 	);
 
-	const test = (element: TimelineElement) =>
+	const test = (element: TimelineElement, fallbackToFullFrame: boolean) =>
 		elementActiveAt({ element, timeTicks }) &&
-		pointInElement({ element, mediaById, canvasWidth, canvasHeight, x, y });
+		pointInElement({ element, mediaById, canvasWidth, canvasHeight, x, y, fallbackToFullFrame });
 
-	// Selected element first: it stays grabbable under overlapping clips.
+	// Selected element first: it stays grabbable under overlapping clips
+	// (fallback allowed — a selected element may always be grabbed).
 	const selected = editor.selection.getSelectedElements()[0];
 	if (selected) {
 		const track = findTrack({ tracks, trackId: selected.trackId });
 		const element = track?.elements.find((el) => el.id === selected.elementId);
-		if (element && test(element)) {
+		if (element && test(element, true)) {
 			return { ref: selected, element };
 		}
 	}
 
 	// Topmost-first: overlay[0] paints last (see header), then down to main.
+	// TWO passes: precise quads only, then (if nothing claimed the touch)
+	// fallback full-frame quads for dimension-less elements — so a clip
+	// with missing metadata stays grabbable without stealing touches from
+	// precisely-bounded elements beneath it.
 	const hitOrder: TimelineTrack[] = [...tracks.overlay, tracks.main];
-	for (const track of hitOrder) {
-		if ("hidden" in track && track.hidden) continue;
-		// Later elements within a track paint later; test them first.
-		for (let i = track.elements.length - 1; i >= 0; i--) {
-			const element = track.elements[i];
-			if (test(element)) {
-				return { ref: { trackId: track.id, elementId: element.id }, element };
+	for (const fallbackToFullFrame of [false, true]) {
+		for (const track of hitOrder) {
+			if ("hidden" in track && track.hidden) continue;
+			// Later elements within a track paint later; test them first.
+			for (let i = track.elements.length - 1; i >= 0; i--) {
+				const element = track.elements[i];
+				if (test(element, fallbackToFullFrame)) {
+					return { ref: { trackId: track.id, elementId: element.id }, element };
+				}
 			}
 		}
 	}

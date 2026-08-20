@@ -65,3 +65,28 @@ describe("pointInElement (preview hit-testing geometry)", () => {
 		expect(pointInElement({ element: text, mediaById: media, ...CANVAS, x: 540, y: 960 })).toBe(false);
 	});
 });
+
+describe("metadata-less media stays grabbable", () => {
+	it("hits a video whose asset record lacks dimensions (full-frame fallback)", () => {
+		const bare = new Map();
+		expect(
+			pointInElement({ element: videoElement(), mediaById: bare, ...CANVAS, x: 540, y: 960 }),
+		).toBe(true);
+	});
+});
+
+describe("two-pass precision (fallback must not steal touches)", () => {
+	it("rejects a dimension-less element when fallback is disabled (precise pass)", () => {
+		const bare = new Map();
+		expect(
+			pointInElement({
+				element: videoElement(),
+				mediaById: bare,
+				...CANVAS,
+				x: 540,
+				y: 960,
+				fallbackToFullFrame: false,
+			}),
+		).toBe(false);
+	});
+});

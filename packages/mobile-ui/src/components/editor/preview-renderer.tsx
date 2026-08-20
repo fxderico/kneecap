@@ -456,7 +456,13 @@ function usePreviewTransformGesture({
 				);
 				if (moved < DRAG_SLOP_PX && session.pointers.size < 2) return;
 				session.dragging = true;
-				event.currentTarget.setPointerCapture(event.pointerId);
+				try {
+					event.currentTarget.setPointerCapture(event.pointerId);
+				} catch {
+					// Defensive: an invalid/stale pointerId (synthetic events,
+					// odd webview states) must not kill the drag — capture is
+					// an optimization, not a correctness requirement.
+				}
 			}
 			applySessionUpdate();
 		},
