@@ -202,6 +202,16 @@ Founder: "i dont see a generation button here for captions", "there should be a 
 
 mobile-ui 50 tests green, all typechecks clean, bundle rebuilt + synced to ios/App/App/public. Founder loop: Xcode ⌘R, then (1) Captions → Generate is the top button, (2) Text → Add text → type in the Text field, (3) home → swipe a project left → Delete.
 
+## Round 21.1 (2026-08-20): the empty-transcript device bug — video containers need audio extraction
+
+Founder's device payload: one segment, ONE empty zero-length token, for a clip full of spoken words. Root cause: `SFSpeechURLRecognitionRequest` fed a VIDEO container (.mov/.mp4) "succeeds" while reading no audio at all — the round-20 harness passed because it fed a pure audio file (the exact class of gap the harness's honest-scope note warned about). Three-part fix:
+
+- **Audio extraction first**: `extractAudio` (AVAssetExportSession → temp .m4a, any container, no-audio-track clips error clearly) now runs before recognition; the temp file is deleted after. Harness step 3 exercises extraction against the actual mp4 VIDEO fixture (1 audio track out, real 4.00s duration) and the live-recognition path now runs THROUGH extraction end-to-end (aiff → m4a → on-device recognition, still green with monotonic word envelopes).
+- **Empty tokens are noise, never words**: `wireResult` filters whitespace-only tokens — the phantom "" word can never ship again; a genuinely speechless clip returns `segments: []`.
+- **Silence is now loud**: a zero-caption result THROWS "No speech was detected in this clip's audio..." instead of the panel reporting done with nothing inserted.
+
+All harness checks pass; mobile-ui 50 green; bundle rebuilt + synced. Founder: Xcode ⌘R, retry Generate on the same clip.
+
 ## Test sweep (2026-08-18, Fable fork agent) — see docs/TEST-REPORT.md
 
 All three CRITICALs found by the sweep are fixed and re-verified live in the browser harness: (C1) GPU init now gates the preview renderer (plus boot-time `ensurePreviewGpu` + font atlas bundled into apps/mobile, so text renders with real fonts); (C2) the home project list re-renders via a selector subscription — the engine always had the data, the UI never re-subscribed (verified: engine 1 / DOM 0 before, 1/1 after; reopen-after-reload rehydrates); (C3) a CrashBoundary paints any React render crash on screen instead of silent black. HIGHs still open, in priority order: Android's EDL parser missing ~12 field families that TS emits and iOS parses (must parse-or-reject, never silently drop); split-at-boundary silently no-ops; audio waveforms never populated (mock-only).

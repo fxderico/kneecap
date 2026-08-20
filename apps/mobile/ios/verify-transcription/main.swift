@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Speech
 
@@ -131,6 +132,44 @@ case .success(let payload):
 		check(start >= lastStart, "token starts monotonic (\(lastStart) -> \(start))")
 		lastStart = start
 	}
+}
+
+// --- 3. Audio extraction from a VIDEO container (the round-21.1 device bug:
+// SFSpeechURLRecognitionRequest fed a video file returns one empty
+// zero-length segment; extraction to .m4a is the fix) ---
+print("== 3. extractAudio from the VIDEO fixture (the device failure mode) ==")
+let fixturePath = CommandLine.arguments.count > 1
+	? CommandLine.arguments[1]
+	: "App/App/Fixtures/kneecap-test-clip.mp4"
+if FileManager.default.fileExists(atPath: fixturePath) {
+	var extractResult: Result<URL, AppleSpeechTranscriberError>?
+	AppleSpeechTranscriber.extractAudio(from: URL(fileURLWithPath: fixturePath)) { result in
+		extractResult = result
+	}
+	if !pump(timeout: 60, until: { extractResult != nil }) {
+		fail("audio extraction timed out")
+	}
+	switch extractResult! {
+	case .failure(let error):
+		fail("extraction from video container failed: \(error.description)")
+	case .success(let m4aURL):
+		defer { try? FileManager.default.removeItem(at: m4aURL) }
+		check(m4aURL.pathExtension == "m4a", "extracted an .m4a from the mp4 video container")
+		let asset = AVURLAsset(url: m4aURL)
+		var duration: Double = -1
+		var audioTrackCount = -1
+		let probeDone = DispatchSemaphore(value: 0)
+		Task {
+			duration = (try? await asset.load(.duration).seconds) ?? -1
+			audioTrackCount = (try? await asset.loadTracks(withMediaType: .audio).count) ?? -1
+			probeDone.signal()
+		}
+		_ = probeDone.wait(timeout: .now() + 30)
+		check(audioTrackCount == 1, "extracted file has exactly one audio track (got \(audioTrackCount))")
+		check(duration > 1.0, "extracted audio has real duration (got \(String(format: "%.2f", duration))s)")
+	}
+} else {
+	print("  SKIP: fixture not found at \(fixturePath) — pass a path as argv[1]")
 }
 
 print("\nALL CHECKS PASSED")

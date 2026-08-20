@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Speech
 
@@ -72,6 +73,49 @@ public enum AppleSpeechTranscriber {
 		return URL(fileURLWithPath: uri)
 	}
 
+	/// Extract the media file's audio track to a temporary plain .m4a.
+	///
+	/// FOUND ON DEVICE (round 21.1): feeding a VIDEO container (the clip's
+	/// .mov/.mp4) straight to `SFSpeechURLRecognitionRequest` "succeeds"
+	/// with one EMPTY zero-length segment — the recognizer reads no audio
+	/// from it. The macOS harness passed because it fed a pure audio file.
+	/// `AVAssetExportSession` reads ANY AVAsset container and writes the
+	/// audio-only file the recognizer is actually reliable on. Completion
+	/// is called exactly once; the caller deletes the temp file.
+	static func extractAudio(
+		from url: URL,
+		completion: @escaping (Result<URL, AppleSpeechTranscriberError>) -> Void
+	) {
+		let asset = AVURLAsset(url: url)
+		Task {
+			do {
+				let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+				guard !audioTracks.isEmpty else {
+					completion(.failure(.audioNotReadable("this clip has no audio track to transcribe")))
+					return
+				}
+				guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+					completion(.failure(.audioNotReadable("audio extraction session could not be created")))
+					return
+				}
+				let outURL = FileManager.default.temporaryDirectory
+					.appendingPathComponent("kneecap-stt-\(UUID().uuidString).m4a")
+				session.outputURL = outURL
+				session.outputFileType = .m4a
+				session.exportAsynchronously {
+					if session.status == .completed {
+						completion(.success(outURL))
+					} else {
+						let reason = session.error?.localizedDescription ?? "status \(session.status.rawValue)"
+						completion(.failure(.audioNotReadable("audio extraction failed: \(reason)")))
+					}
+				}
+			} catch {
+				completion(.failure(.audioNotReadable("audio tracks unreadable: \(error.localizedDescription)")))
+			}
+		}
+	}
+
 	/// Transcribe a media file's audio on-device. `modelSize` from the wire
 	/// contract is accepted and ignored — Apple's recognizer has no model
 	/// tiers (documented on the TS side too). Completion is called exactly
@@ -81,11 +125,30 @@ public enum AppleSpeechTranscriber {
 		languageHint: String?,
 		completion: @escaping (Result<[String: Any], AppleSpeechTranscriberError>) -> Void
 	) {
-		let url = audioURL(fromUri: audioUri)
-		guard FileManager.default.fileExists(atPath: url.path) else {
-			completion(.failure(.audioNotReadable(url.path)))
+		let sourceURL = audioURL(fromUri: audioUri)
+		guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+			completion(.failure(.audioNotReadable(sourceURL.path)))
 			return
 		}
+		extractAudio(from: sourceURL) { extraction in
+			switch extraction {
+			case .failure(let error):
+				completion(.failure(error))
+			case .success(let audioOnlyURL):
+				recognize(audioFileURL: audioOnlyURL, languageHint: languageHint) { result in
+					try? FileManager.default.removeItem(at: audioOnlyURL)
+					completion(result)
+				}
+			}
+		}
+	}
+
+	/// The recognition half, over a PLAIN AUDIO file (see extractAudio).
+	static func recognize(
+		audioFileURL url: URL,
+		languageHint: String?,
+		completion: @escaping (Result<[String: Any], AppleSpeechTranscriberError>) -> Void
+	) {
 
 		let localeId = languageHint ?? "en-US"
 		guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeId)) else {
@@ -131,6 +194,7 @@ public enum AppleSpeechTranscriber {
 					confidence: Double(segment.confidence)
 				)
 			}
+			print("[kneecap-stt] recognized \(words.count) raw words from \(url.lastPathComponent)")
 			completion(.success(wireResult(
 				words: words,
 				fullText: result.bestTranscription.formattedString
@@ -147,7 +211,13 @@ public enum AppleSpeechTranscriber {
 	/// gives one timing signal, which IS the reliable envelope. Zero words
 	/// (no speech) returns `segments: []` per the contract's "genuinely no
 	/// decodable words" case.
-	public static func wireResult(words: [RecognizedWord], fullText: String) -> [String: Any] {
+	public static func wireResult(words allWords: [RecognizedWord], fullText: String) -> [String: Any] {
+		// Empty tokens are noise, never words: the device bug this guards
+		// (round 21.1) was a single "" word with zero timestamps standing in
+		// for a whole spoken clip — emitting it produced a phantom caption.
+		let words = allWords.filter {
+			!$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+		}
 		guard let first = words.first, let last = words.last else {
 			return ["segments": [[String: Any]]()]
 		}

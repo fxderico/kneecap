@@ -149,7 +149,16 @@ export async function generateCaptionsForClip({
 		timelineStartTime: target.startTime,
 		stylePresetId,
 	});
-	return insertGeneratedCaptions({ editor, elements });
+	const inserted = insertGeneratedCaptions({ editor, elements });
+	if (!inserted) {
+		// Round 21.1: an empty result must SAY so — the device bug shipped a
+		// single empty token and the panel silently reported "done" with
+		// nothing inserted.
+		throw new Error(
+			"No speech was detected in this clip's audio. If the clip definitely has speech, check the language setting.",
+		);
+	}
+	return inserted;
 }
 
 /**
