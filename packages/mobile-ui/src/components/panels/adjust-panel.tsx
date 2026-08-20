@@ -28,9 +28,10 @@ const SLIDERS: Array<{ key: string; label: string; min: number; max: number }> =
  * M8 Adjust panel — task scope: "basic sliders ONLY: brightness/contrast/
  * saturation/temperature/tint/sharpen/vignette" (plan §8.0 item 4). Backed
  * by the real `adjust` `EffectDefinition` (`effects/definitions/adjust.ts`)
- * — every drag writes through `UpdateClipEffectParamsCommand`. See that
- * definition's header for the honest scope note: the state is real, the
- * GPU pass is not implemented yet, so the preview will not visibly change.
+ * — every drag writes through `UpdateClipEffectParamsCommand`. Round 22:
+ * the GPU pass exists (`color-adjust` in the wgpu compositor) and the
+ * native export applies the same chain via CoreImage — sliders are LIVE
+ * in preview and real in exports.
  *
  * `effect` is derived directly from the live `element` prop every render —
  * NOT held in local component state — so that after `ensureSingleEffect`'s

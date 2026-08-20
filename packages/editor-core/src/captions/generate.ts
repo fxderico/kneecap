@@ -17,6 +17,7 @@
  */
 
 import { DEFAULT_TRACK_NAMES } from "@/timeline/tracks";
+import { chunkTranscriptSegments } from "./chunk";
 import type { CaptionWord, CreateCaptionElement } from "@/timeline/types";
 import { buildDefaultParamValues, getBuiltInElementParams } from "@/params/registry";
 import { buildCaptionStyleParamsPatch, DEFAULT_CAPTION_STYLE_PRESET_ID } from "./styles";
@@ -94,7 +95,12 @@ export function buildCaptionElementsFromTranscript({
 
 	const elements: CreateCaptionElement[] = [];
 
-	for (const segment of segments) {
+	// Round 22: publikclip-style chunking (captions/chunk.ts) — a few words
+	// per caption, each spanning exactly its words' spoken time, instead of
+	// one long sliding caption per transcript segment.
+	const chunked = chunkTranscriptSegments(segments);
+
+	for (const segment of chunked) {
 		if (segment.words.length === 0) continue;
 
 		const segmentStartTicks = ticksFromMicros({ micros: segment.startMicros });

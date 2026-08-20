@@ -84,6 +84,66 @@ public struct OverlayVideoLayer {
 	}
 }
 
+/// The full CapCut "Adjust" slider set (round 22 — founder: "adjustment to
+/// video menu does not work in preview or in export"), values as authored
+/// in the EDL effect params (-100...100, sharpen/vignette 0...100). Applied
+/// as a CoreImage chain in the compositor; mapping constants chosen to
+/// visually track the sliders at moderate settings.
+public struct AdjustSettings {
+	public let brightness: Double
+	public let contrast: Double
+	public let saturation: Double
+	public let temperature: Double
+	public let tint: Double
+	public let sharpen: Double
+	public let vignette: Double
+
+	public init(brightness: Double, contrast: Double, saturation: Double, temperature: Double, tint: Double, sharpen: Double, vignette: Double) {
+		self.brightness = brightness
+		self.contrast = contrast
+		self.saturation = saturation
+		self.temperature = temperature
+		self.tint = tint
+		self.sharpen = sharpen
+		self.vignette = vignette
+	}
+
+	public var isNeutral: Bool {
+		brightness == 0 && contrast == 0 && saturation == 0 && temperature == 0 && tint == 0 && sharpen == 0 && vignette == 0
+	}
+
+	/// CoreImage chain — same ordering as CapCut's visual result: color
+	/// controls, then white balance, then sharpen, then vignette.
+	func apply(to input: CIImage, renderSize: CGSize) -> CIImage {
+		var image = input
+		if brightness != 0 || contrast != 0 || saturation != 0 {
+			image = image.applyingFilter("CIColorControls", parameters: [
+				"inputBrightness": brightness / 100.0 * 0.5,
+				"inputContrast": 1.0 + contrast / 100.0 * 0.5,
+				"inputSaturation": max(0, 1.0 + saturation / 100.0),
+			])
+		}
+		if temperature != 0 || tint != 0 {
+			image = image.applyingFilter("CITemperatureAndTint", parameters: [
+				"inputNeutral": CIVector(x: 6500 - CGFloat(temperature) * 30, y: CGFloat(tint) * 0.5),
+				"inputTargetNeutral": CIVector(x: 6500, y: 0),
+			])
+		}
+		if sharpen > 0 {
+			image = image.applyingFilter("CISharpenLuminance", parameters: [
+				"inputSharpness": sharpen / 100.0 * 0.9,
+			])
+		}
+		if vignette > 0 {
+			image = image.applyingFilter("CIVignette", parameters: [
+				"inputIntensity": vignette / 100.0 * 1.6,
+				"inputRadius": min(renderSize.width, renderSize.height) / 200.0,
+			])
+		}
+		return image
+	}
+}
+
 public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol {
 	public var timeRange: CMTimeRange
 	public var enablePostProcessing: Bool = false
@@ -118,6 +178,9 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 	/// frames, which is the overwhelming majority of any real timeline.
 	public let primaryBrightness: Double?
 	public let secondaryBrightness: Double?
+	/// Full Adjust set per source (round 22); nil == no adjust effect.
+	public let primaryAdjust: AdjustSettings?
+	public let secondaryAdjust: AdjustSettings?
 	/// Placement of each source into the render frame (preview-parity fit +
 	/// clip transform). Defaults to `.identity` (center, contain-fit only)
 	/// so a caller that has no EDL context still gets a full-frame result.
@@ -139,6 +202,8 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		transitionKind: String? = nil,
 		primaryBrightness: Double? = nil,
 		secondaryBrightness: Double? = nil,
+		primaryAdjust: AdjustSettings? = nil,
+		secondaryAdjust: AdjustSettings? = nil,
 		primaryPlacement: SourcePlacement = .identity,
 		secondaryPlacement: SourcePlacement = .identity,
 		backgroundColor: CIColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1),
@@ -152,6 +217,8 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		self.transitionKind = transitionKind
 		self.primaryBrightness = primaryBrightness
 		self.secondaryBrightness = secondaryBrightness
+		self.primaryAdjust = primaryAdjust
+		self.secondaryAdjust = secondaryAdjust
 		self.primaryPlacement = primaryPlacement
 		self.secondaryPlacement = secondaryPlacement
 		self.backgroundColor = backgroundColor
@@ -230,6 +297,9 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 			if let brightness = instruction.primaryBrightness {
 				image = image.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
 			}
+			if let adjust = instruction.primaryAdjust {
+				image = adjust.apply(to: image, renderSize: renderSize)
+			}
 			image = Self.place(
 				image: image,
 				placement: instruction.primaryPlacement,
@@ -241,6 +311,9 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 				var secondaryImage = CIImage(cvPixelBuffer: secondaryBuffer)
 				if let brightness = instruction.secondaryBrightness {
 					secondaryImage = secondaryImage.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
+				}
+				if let adjust = instruction.secondaryAdjust {
+					secondaryImage = adjust.apply(to: secondaryImage, renderSize: renderSize)
 				}
 				secondaryImage = Self.place(
 					image: secondaryImage,

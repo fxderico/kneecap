@@ -27,7 +27,7 @@
 		"@kneecap/mobile-ui": "workspace:*",
 		"@kneecap/native-bridge": "workspace:*",
 		"mediabunny": "^1.29.1",
-		"opencut-wasm": "^0.2.10",
+		"opencut-wasm": "file:../../rust/wasm/pkg",
 		"react": "^19.0.0",
 		"react-dom": "^19.0.0"
 	},

@@ -47,7 +47,7 @@ import {
 	setProjectResolution,
 	setProjectBackground,
 } from "../../editor/actions";
-import { Scissors, Trash2, CopyPlus, SlidersHorizontal, VolumeX, WandSparkles, ImagePlus } from "lucide-react";
+import { Scissors, Trash2, CopyPlus, SlidersHorizontal, Type, VolumeX, WandSparkles, ImagePlus } from "lucide-react";
 import { CC_ICON_STROKE } from "../../tokens";
 import { PanelSheet } from "../panel-sheet";
 import { SheetHeader } from "../sheet-header";
@@ -87,6 +87,11 @@ const CONTEXTUAL_ITEMS: ToolbarItemDef[] = [
 	{ id: "duplicate", label: "Duplicate", icon: CopyPlus },
 	{ id: "edit", label: "Edit", icon: SlidersHorizontal },
 ];
+
+/** Round 22 (founder: "there should be an edit text button in the menu
+ *  when i select it"): text and caption clips get a direct Edit-text verb
+ *  that opens the panel with their content field. */
+const EDIT_TEXT_ITEM: ToolbarItemDef = { id: "edit-text", label: "Edit text", icon: Type };
 
 const VISUAL_ONLY_SHEETS = new Set<SheetId>(["effects", "filters", "adjust"]);
 
@@ -344,9 +349,17 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 
 			{selectedRef && selectedElement && (
 				<SubToolbar
-					items={CONTEXTUAL_ITEMS}
+					items={
+						selectedElement.type === "text" || selectedElement.type === "caption"
+							? [EDIT_TEXT_ITEM, ...CONTEXTUAL_ITEMS]
+							: CONTEXTUAL_ITEMS
+					}
 					activeId={activeSheet}
 					onSelect={(id) => {
+						if (id === "edit-text") {
+							setActiveSheet(selectedElement.type === "caption" ? "captions" : "text");
+							return;
+						}
 						// Direct verbs act immediately; only "edit" opens a sheet.
 						if (id === "split") {
 							splitAtPlayhead({ editor, ref: selectedRef });

@@ -391,7 +391,38 @@ Task {
 		let pipMainBand = meanBrightness(pipActiveFrame, xFraction: 0.02..<0.98, yFraction: 0.40..<0.60)
 		check(pipMainBand > 10.0, "main-track band still renders beneath the PiP (got \(pipMainBand))")
 
-		print("\nALL CHECKS PASSED")
+		// --- 11. Adjust effect: saturation -100 desaturates the export (round 22:
+// "adjustment to video menu does not work in preview or in export") ---
+print("== 11. Adjust effect renders in the export (saturation -100 -> grayscale) ==")
+var adjustEdlJson = portraitEdlJson
+var adjustTracks = adjustEdlJson["tracks"] as! [[String: Any]]
+var adjustMain = adjustTracks[0]
+var adjustClips = adjustMain["clips"] as! [[String: Any]]
+adjustClips[0]["effects"] = [[
+	"effectId": "fx-adjust-1", "type": "adjust", "enabled": true,
+	"params": ["brightness": 0, "contrast": 0, "saturation": -100, "temperature": 0, "tint": 0, "sharpen": 0, "vignette": 0],
+	"animations": [] as [[String: Any]],
+]]
+adjustMain["clips"] = adjustClips
+adjustTracks[0] = adjustMain
+adjustEdlJson["tracks"] = adjustTracks
+let adjustEdl = try EdlDecoder.decode(jsObject: adjustEdlJson)
+let adjustURL = workDir.appendingPathComponent("adjust.mp4")
+_ = try await EdlExporter.export(
+	edl: adjustEdl,
+	resolveAssetURL: { _ in fixtureURL },
+	outputURL: adjustURL,
+	onProgress: { _ in }
+)
+let adjustFrame = try extractFrame(from: adjustURL, at: 1.0)
+let baselineFrame = try extractFrame(from: portraitURL, at: 1.0)
+let adjustedChroma = meanChromaSpread(adjustFrame, xFraction: 0.1..<0.9, yFraction: 0.40..<0.60)
+let baselineChroma = meanChromaSpread(baselineFrame, xFraction: 0.1..<0.9, yFraction: 0.40..<0.60)
+print("  chroma spread: baseline=\(String(format: "%.2f", baselineChroma)) adjusted=\(String(format: "%.2f", adjustedChroma))")
+check(baselineChroma > 8.0, "baseline fixture band is genuinely colorful (got \(baselineChroma))")
+check(adjustedChroma < 3.0, "saturation -100 clip exports grayscale (got \(adjustedChroma))")
+
+print("\nALL CHECKS PASSED")
 		exitCode = 0
 	} catch {
 		FileHandle.standardError.write("FAIL: uncaught error: \(error)\n".data(using: .utf8)!)
@@ -466,6 +497,27 @@ func meanBrightness(_ frame: RGBAFrame, xFraction: Range<Double>, yFraction: Ran
 		for x in Swift.stride(from: x0, to: x1, by: 2) {
 			let idx = (y * frame.width + x) * 4
 			total += (Double(frame.bytes[idx]) + Double(frame.bytes[idx + 1]) + Double(frame.bytes[idx + 2])) / 3
+			count += 1
+		}
+	}
+	return count > 0 ? total / count : 0
+}
+
+/// Mean per-pixel chroma spread (max channel - min channel) over a region —
+/// ~0 for a grayscale frame, large for colorful content. Round 22's adjust
+/// check uses it to prove saturation -100 actually desaturates the export.
+func meanChromaSpread(_ frame: RGBAFrame, xFraction: Range<Double>, yFraction: Range<Double>) -> Double {
+	let x0 = max(0, Int(Double(frame.width) * xFraction.lowerBound))
+	let x1 = min(frame.width, Int(Double(frame.width) * xFraction.upperBound))
+	let y0 = max(0, Int(Double(frame.height) * yFraction.lowerBound))
+	let y1 = min(frame.height, Int(Double(frame.height) * yFraction.upperBound))
+	var total: Double = 0
+	var count: Double = 0
+	for y in Swift.stride(from: y0, to: y1, by: 2) {
+		for x in Swift.stride(from: x0, to: x1, by: 2) {
+			let idx = (y * frame.width + x) * 4
+			let r = Double(frame.bytes[idx]), g = Double(frame.bytes[idx + 1]), b = Double(frame.bytes[idx + 2])
+			total += Swift.max(r, g, b) - Swift.min(r, g, b)
 			count += 1
 		}
 	}

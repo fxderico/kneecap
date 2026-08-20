@@ -39,6 +39,22 @@ public enum VideoCompositionBuilder {
 		var assetById: [String: EdlAsset] = [:]
 		for a in edl.assets { assetById[a.assetId] = a }
 
+		func enabledAdjust(_ clipId: String) -> AdjustSettings? {
+			guard let clip = clipById[clipId] else { return nil }
+			guard let fx = clip.effects.first(where: { $0.type == "adjust" && $0.enabled }) else { return nil }
+			let value = { (key: String) -> Double in fx.params[key]?.asDouble ?? 0 }
+			let settings = AdjustSettings(
+				brightness: value("brightness"),
+				contrast: value("contrast"),
+				saturation: value("saturation"),
+				temperature: value("temperature"),
+				tint: value("tint"),
+				sharpen: value("sharpen"),
+				vignette: value("vignette")
+			)
+			return settings.isNeutral ? nil : settings
+		}
+
 		func enabledBrightness(_ clipId: String) -> Double? {
 			guard let clip = clipById[clipId] else { return nil }
 			guard let fx = clip.effects.first(where: { $0.type == "brightness" && $0.enabled }) else { return nil }
@@ -134,6 +150,7 @@ public enum VideoCompositionBuilder {
 				timeRange: range,
 				primaryTrackID: trackID,
 				primaryBrightness: enabledBrightness(placement.clipId),
+				primaryAdjust: enabledAdjust(placement.clipId),
 				primaryPlacement: sourcePlacement(placement.clipId),
 				backgroundColor: backgroundColor,
 				overlayVideoLayers: pipLayersIntersecting(range)
@@ -158,6 +175,8 @@ public enum VideoCompositionBuilder {
 				transitionKind: window.kind,
 				primaryBrightness: enabledBrightness(outgoingId),
 				secondaryBrightness: enabledBrightness(incomingId),
+				primaryAdjust: enabledAdjust(outgoingId),
+				secondaryAdjust: enabledAdjust(incomingId),
 				primaryPlacement: sourcePlacement(outgoingId),
 				secondaryPlacement: sourcePlacement(incomingId),
 				backgroundColor: backgroundColor,

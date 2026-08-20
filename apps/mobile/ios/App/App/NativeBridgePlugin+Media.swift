@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Capacitor
 import PhotosUI
@@ -22,11 +23,14 @@ extension NativeBridgePlugin {
         var filters: [PHPickerFilter] = []
         if kinds.contains("video") { filters.append(.videos) }
         if kinds.contains("image") { filters.append(.images) }
-        // "audio" is not representable via PHPicker (Photos library is
-        // video/image only) — plan M8's device-audio-import is a separate,
-        // document-picker-based flow. A kinds:["audio"]-only request with no
-        // usable filter falls through to the videos+images default below
-        // rather than presenting an empty picker.
+        // Round 22 (founder: "there needs to be audio import option...
+        // opens up files picker, then puts it in audio track"): an
+        // audio-only request routes to the Files document picker — PHPicker
+        // cannot represent audio (Photos library is video/image only).
+        if kinds.contains("audio") && filters.isEmpty {
+            presentAudioDocumentPicker(call: call, allowMultiple: allowMultiple)
+            return
+        }
 
         var config = PHPickerConfiguration(photoLibrary: .shared())
         config.filter = filters.isEmpty ? .any(of: [.videos, .images]) : .any(of: filters)
@@ -468,5 +472,95 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
             "codec": probed.codec,
             "frameRate": frameRate,
         ])
+    }
+}
+
+
+// MARK: - Audio document picker (round 22)
+
+extension NativeBridgePlugin {
+    /// Files-app picker for audio — `asCopy: true` hands us app-owned temp
+    /// copies (no security-scoped bookmarks needed), which are then copied
+    /// into the same sandboxed media custody every other import uses and
+    /// probed with the same `MediaProbe`.
+    func presentAudioDocumentPicker(call: CAPPluginCall, allowMultiple: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard let presenter = self.bridge?.viewController else {
+                call.reject("no view controller available to present the picker from")
+                return
+            }
+            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.audio], asCopy: true)
+            picker.allowsMultipleSelection = allowMultiple
+            let coordinator = AudioDocumentPickerCoordinator(call: call, onFinished: { [weak self] in
+                self?.activePickerCoordinator = nil
+            })
+            self.activePickerCoordinator = coordinator
+            picker.delegate = coordinator
+            presenter.present(picker, animated: true)
+        }
+    }
+}
+
+final class AudioDocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
+    private let call: CAPPluginCall
+    private let onFinished: () -> Void
+
+    init(call: CAPPluginCall, onFinished: @escaping () -> Void) {
+        self.call = call
+        self.onFinished = onFinished
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        call.resolve(["handles": [[String: Any]]()])
+        onFinished()
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        let call = self.call
+        let onFinished = self.onFinished
+        Task {
+            var handles: [[String: Any]] = []
+            for url in urls {
+                let assetId = UUID().uuidString
+                let ext = url.pathExtension.isEmpty ? "m4a" : url.pathExtension
+                let custodyURL: URL
+                do {
+                    custodyURL = try MediaSandbox.copyIntoMediaCustody(
+                        sourceURL: url,
+                        assetId: assetId,
+                        fileExtension: ext
+                    )
+                } catch {
+                    print("[kneecap-audio-import] copy failed for \(url.lastPathComponent): \(error)")
+                    continue
+                }
+                let attrs = try? FileManager.default.attributesOfItem(atPath: custodyURL.path)
+                let sizeBytes = (attrs?[.size] as? Int) ?? 0
+                var durationMicros: Int64 = 0
+                if let probed = try? await MediaProbe.probe(url: custodyURL) {
+                    durationMicros = probed.durationMicros
+                } else {
+                    let seconds = (try? await AVURLAsset(url: custodyURL).load(.duration).seconds) ?? 0
+                    durationMicros = Int64(seconds * 1_000_000)
+                }
+                handles.append([
+                    "id": assetId,
+                    "uri": custodyURL.path,
+                    "kind": "audio",
+                    "fileName": custodyURL.lastPathComponent,
+                    "sizeBytes": sizeBytes,
+                    "durationMicros": durationMicros,
+                    "width": 0,
+                    "height": 0,
+                    "rotationDegrees": 0,
+                    "hasAudio": true,
+                    "codec": ext,
+                    "frameRate": NSNull(),
+                ])
+            }
+            call.resolve(["handles": handles])
+            onFinished()
+        }
     }
 }

@@ -9,6 +9,8 @@ use crate::{EffectPass, UniformValue};
 
 const GAUSSIAN_BLUR_SHADER_ID: &str = "gaussian-blur";
 const GAUSSIAN_BLUR_SHADER_SOURCE: &str = include_str!("shaders/gaussian_blur.wgsl");
+const COLOR_ADJUST_SHADER_ID: &str = "color-adjust";
+const COLOR_ADJUST_SHADER_SOURCE: &str = include_str!("shaders/color_adjust.wgsl");
 
 pub struct ApplyEffectsOptions<'a> {
     pub source: &'a wgpu::Texture,
@@ -50,6 +52,10 @@ struct EffectUniformBuffer {
     resolution: [f32; 2],
     direction: [f32; 2],
     scalars: [f32; 4],
+    // Second scalar bank (round 22's color-adjust pass needs 7 values).
+    // Blur's WGSL declares only the prefix of this struct — binding a
+    // larger buffer than the shader struct is valid wgpu.
+    scalars2: [f32; 4],
 }
 
 impl EffectPipeline {
@@ -131,8 +137,53 @@ impl EffectPipeline {
                     multiview_mask: None,
                     cache: None,
                 });
-        let pipelines =
-            HashMap::from([(GAUSSIAN_BLUR_SHADER_ID.to_string(), gaussian_blur_pipeline)]);
+        let color_adjust_shader_module =
+            context
+                .device()
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("effects-color-adjust-shader"),
+                    source: wgpu::ShaderSource::Wgsl(COLOR_ADJUST_SHADER_SOURCE.into()),
+                });
+        let color_adjust_pipeline =
+            context
+                .device()
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("effects-color-adjust-pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &vertex_shader_module,
+                        entry_point: Some("vertex_main"),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            }],
+                        }],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &color_adjust_shader_module,
+                        entry_point: Some("fragment_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: context.texture_format(),
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                });
+        let pipelines = HashMap::from([
+            (GAUSSIAN_BLUR_SHADER_ID.to_string(), gaussian_blur_pipeline),
+            (COLOR_ADJUST_SHADER_ID.to_string(), color_adjust_pipeline),
+        ]);
 
         Self {
             uniform_bind_group_layout,
@@ -268,6 +319,43 @@ fn pack_effect_uniforms(
     height: u32,
 ) -> Result<EffectUniformBuffer, EffectsError> {
     let shader = pass.shader.as_str();
+
+    if shader == COLOR_ADJUST_SHADER_ID {
+        const KEYS: [&str; 7] = [
+            "u_brightness",
+            "u_contrast",
+            "u_saturation",
+            "u_temperature",
+            "u_tint",
+            "u_sharpen",
+            "u_vignette",
+        ];
+        for uniform in pass.uniforms.keys() {
+            if !KEYS.contains(&uniform.as_str()) {
+                return Err(EffectsError::UnsupportedUniform {
+                    shader: shader.to_string(),
+                    uniform: uniform.clone(),
+                });
+            }
+        }
+        return Ok(EffectUniformBuffer {
+            resolution: [width as f32, height as f32],
+            direction: [0.0, 0.0],
+            scalars: [
+                read_number_uniform(pass, "u_brightness")?,
+                read_number_uniform(pass, "u_contrast")?,
+                read_number_uniform(pass, "u_saturation")?,
+                read_number_uniform(pass, "u_sharpen")?,
+            ],
+            scalars2: [
+                read_number_uniform(pass, "u_temperature")?,
+                read_number_uniform(pass, "u_tint")?,
+                read_number_uniform(pass, "u_vignette")?,
+                0.0,
+            ],
+        });
+    }
+
     let sigma = read_number_uniform(pass, "u_sigma")?;
     let step = read_number_uniform(pass, "u_step")?;
     let direction = read_vec2_uniform(pass, "u_direction")?;
@@ -286,6 +374,7 @@ fn pack_effect_uniforms(
         resolution: [width as f32, height as f32],
         direction,
         scalars: [sigma, step, 0.0, 0.0],
+        scalars2: [0.0, 0.0, 0.0, 0.0],
     })
 }
 
@@ -327,4 +416,33 @@ fn read_vec2_uniform(pass: &EffectPass, uniform: &str) -> Result<[f32; 2], Effec
         });
     }
     Ok([values[0], values[1]])
+}
+
+#[cfg(test)]
+mod shader_validation_tests {
+    use super::*;
+
+    /// WGSL only fails at RUNTIME shader-module creation — a syntax error
+    /// here would kill ALL rendering at init. Parse + validate both
+    /// shaders at test time instead (round 22, added with color_adjust).
+    fn assert_valid_wgsl(name: &str, source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{name} failed validation: {e:?}"));
+    }
+
+    #[test]
+    fn gaussian_blur_shader_is_valid() {
+        assert_valid_wgsl("gaussian_blur.wgsl", GAUSSIAN_BLUR_SHADER_SOURCE);
+    }
+
+    #[test]
+    fn color_adjust_shader_is_valid() {
+        assert_valid_wgsl("color_adjust.wgsl", COLOR_ADJUST_SHADER_SOURCE);
+    }
 }

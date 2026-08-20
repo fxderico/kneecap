@@ -414,6 +414,45 @@ export async function importAndPlaceMedia({
 	return imported.length;
 }
 
+/**
+ * Round 22 (founder: "there needs to be audio import option when u tap
+ * audio in menu where it opens up files picker. then puts it in audio
+ * track"): Files-picker audio import — native UIDocumentPicker via the
+ * same pickMedia bridge (kinds:["audio"]), custody-copied + probed like
+ * every other import, then placed on an audio track at the playhead.
+ */
+export async function importAndPlaceAudio({
+	editor,
+	onProgress,
+}: {
+	editor: EditorCore;
+	onProgress?: NativeImportProgressHandler;
+}): Promise<number> {
+	const bridge = await getNativeBridge();
+	const projectId = editor.project.getActive().metadata.id;
+	const { imported } = await importMediaFromNative({
+		editor,
+		projectId,
+		source: bridge,
+		kinds: ["audio"],
+		allowMultiple: true,
+		onProgress,
+	});
+	for (const asset of imported) {
+		const create = buildElementFromMedia({
+			mediaId: asset.id,
+			mediaType: "audio",
+			name: asset.name,
+			duration: mediaTimeFromSeconds({ seconds: asset.duration || 1 }),
+			startTime: editor.playback.getCurrentTime(),
+		});
+		editor.command.execute({
+			command: new InsertElementCommand({ element: create, placement: { mode: "auto", trackType: "audio" } }),
+		});
+	}
+	return imported.length;
+}
+
 // --------------------------------- Audio ------------------------------------
 
 export function insertLocalSound({

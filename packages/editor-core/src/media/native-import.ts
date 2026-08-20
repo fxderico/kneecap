@@ -324,13 +324,16 @@ export async function importMediaFromNative({
 		// (founder's iPhone, 2026-08-19 — every JPEG import died). The
 		// web-fallback contract already states the rule for proxy-less kinds:
 		// the proxy IS the source. The still is also its own thumbnail.
-		if (handle.kind === "image") {
+		// Audio takes the same rule (round 22's Files-picker import): the
+		// native pipeline is a VIDEO transcoder; for proxy-less kinds the
+		// proxy IS the source.
+		if (handle.kind === "image" || handle.kind === "audio") {
 			finalProxy = {
 				assetId: handle.id,
 				stage: "done",
 				fraction: 1,
 				proxyUri: handle.uri,
-				thumbnailUris: [handle.uri],
+				thumbnailUris: handle.kind === "image" ? [handle.uri] : [],
 			};
 			onProgress?.({
 				index,

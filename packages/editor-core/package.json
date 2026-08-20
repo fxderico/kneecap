@@ -44,7 +44,7 @@
 		"culori": "^4.0.2",
 		"eventemitter3": "^5.0.1",
 		"mediabunny": "^1.29.1",
-		"opencut-wasm": "^0.2.10",
+		"opencut-wasm": "file:../../rust/wasm/pkg",
 		"soundtouchjs": "^0.3.0"
 	},
 	"peerDependencies": {

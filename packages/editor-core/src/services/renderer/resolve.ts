@@ -138,7 +138,12 @@ function resolveEffectPassGroups({
 				width,
 				height,
 			});
-		});
+		})
+		// An effect at neutral settings (adjust with every slider at 0)
+		// resolves to ZERO passes; the wasm compositor rejects an empty
+		// group ("At least one effect pass is required"), which would
+		// black the whole frame.
+		.filter((group) => group.length > 0);
 }
 
 function resolveVisualState({

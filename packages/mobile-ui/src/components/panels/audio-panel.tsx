@@ -1,10 +1,11 @@
-import { Music } from "lucide-react";
+import { FolderOpen, Music } from "lucide-react";
 import { CC_ICON_STROKE } from "../../tokens";
 import { PanelSheet } from "../panel-sheet";
 import { SheetHeader } from "../sheet-header";
 import type { EditorCore } from "@kneecap/editor-core";
 import { getLocalSounds } from "@kneecap/editor-core/sounds/local-sounds";
-import { insertLocalSound } from "../../editor/actions";
+import { importAndPlaceAudio, insertLocalSound } from "../../editor/actions";
+import { useState } from "react";
 
 interface AudioPanelProps {
 	editor: EditorCore;
@@ -22,8 +23,34 @@ interface AudioPanelProps {
  */
 export function AudioPanel({ editor, onClose, onInserted }: AudioPanelProps) {
 	const sounds = getLocalSounds();
+	const [importing, setImporting] = useState(false);
+	const [importError, setImportError] = useState<string | null>(null);
 	return (
 		<PanelSheet onScrimClick={onClose} header={<SheetHeader onClose={onClose} />}>
+			{/* Round 22 (founder): Files-picker audio import onto the audio
+			    track. Native shells open the real document picker; the web
+			    harness's fallback bridge reports its own honest error. */}
+			<button
+				type="button"
+				className="cc-panel-actions__btn"
+				disabled={importing}
+				onClick={() => {
+					setImporting(true);
+					setImportError(null);
+					importAndPlaceAudio({ editor })
+						.then((count) => {
+							if (count > 0) onClose();
+						})
+						.catch((error: unknown) =>
+							setImportError(error instanceof Error ? error.message : String(error)),
+						)
+						.finally(() => setImporting(false));
+				}}
+			>
+				<FolderOpen size={20} strokeWidth={CC_ICON_STROKE} />
+				<span>{importing ? "Importing…" : "Import audio from Files"}</span>
+			</button>
+			{importError && <p className="cc-panel-note">{importError}</p>}
 			<p className="cc-panel-note">Bundled local sounds — no network, no CapCut library clone.</p>
 			<div className="cc-panel-actions">
 				{sounds.map((sound) => (
