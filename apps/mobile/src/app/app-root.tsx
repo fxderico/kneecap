@@ -18,7 +18,7 @@
 import "@kneecap/mobile-ui/tokens.css";
 import "@kneecap/mobile-ui/components.css";
 import "./app-root.css";
-import { Component, StrictMode, useEffect, useState, type ReactNode } from "react";
+import { Component, StrictMode, useEffect, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { EditorCore, registerNativeMediaPathResolver, registerNativeAudioRouter } from "@kneecap/editor-core";
 import { getNativeBridge } from "@kneecap/native-bridge";
@@ -188,28 +188,120 @@ function HomeScreen({ onOpenEditor }: { onOpenEditor: () => void }) {
 			) : (
 				<ul className="kc-home__list">
 					{projects.map((p) => (
-						<li key={p.id}>
-							<button
-								type="button"
-								className="kc-home__item"
-								disabled={busy}
-								onClick={() => void run(() => editor.project.loadProject({ id: p.id }))}
-							>
-								{p.thumbnail ? (
-									<img src={p.thumbnail} alt="" className="kc-home__thumb" />
-								) : (
-									<span className="kc-home__thumb kc-home__thumb--empty" />
-								)}
-								<span className="kc-home__meta">
-									<span className="kc-home__name">{p.name}</span>
-									<span className="kc-home__date">{new Date(p.updatedAt).toLocaleDateString()}</span>
-								</span>
-							</button>
-						</li>
+						<SwipeableProjectRow
+							key={p.id}
+							name={p.name}
+							thumbnail={p.thumbnail}
+							updatedAt={p.updatedAt}
+							disabled={busy}
+							onOpen={() => void run(() => editor.project.loadProject({ id: p.id }))}
+							onDelete={() => {
+								if (!window.confirm(`Delete “${p.name}”? This can’t be undone.`)) return;
+								void run(() => editor.project.deleteProjects({ ids: [p.id] }));
+							}}
+						/>
 					))}
 				</ul>
 			)}
 		</div>
+	);
+}
+
+/**
+ * Round 21 (founder: "there should be a slide to delete projects on
+ * home"): CapCut-style swipe-left reveals a Delete button behind the row.
+ * Plain pointer events (works for touch and the dev harness's mouse),
+ * `touch-action: pan-y` so vertical list scrolling stays native. A tap on
+ * a swiped-open row closes it instead of opening the project; Delete
+ * confirms before calling the engine's real `deleteProjects` (permanent —
+ * it removes the project AND its media custody).
+ */
+function SwipeableProjectRow({
+	name,
+	thumbnail,
+	updatedAt,
+	disabled,
+	onOpen,
+	onDelete,
+}: {
+	name: string;
+	thumbnail?: string;
+	updatedAt: Date | string;
+	disabled: boolean;
+	onOpen: () => void;
+	onDelete: () => void;
+}) {
+	const [offsetX, setOffsetX] = useState(0);
+	const dragRef = useRef<{ startX: number; startOffset: number; dragging: boolean } | null>(null);
+	// A real swipe's pointerup is followed by a synthetic click on the item —
+	// without this one-shot suppressor that click instantly re-closed the
+	// row the swipe just opened.
+	const suppressClickRef = useRef(false);
+	const OPEN_X = -88;
+
+	return (
+		<li
+			className="kc-home__row"
+			style={{ touchAction: "pan-y" }}
+			onPointerDown={(event) => {
+				dragRef.current = { startX: event.clientX, startOffset: offsetX, dragging: false };
+			}}
+			onPointerMove={(event) => {
+				const drag = dragRef.current;
+				if (!drag) return;
+				const dx = event.clientX - drag.startX;
+				if (!drag.dragging && Math.abs(dx) < 8) return;
+				drag.dragging = true;
+				setOffsetX(Math.min(0, Math.max(OPEN_X - 16, drag.startOffset + dx)));
+			}}
+			onPointerUp={() => {
+				const drag = dragRef.current;
+				dragRef.current = null;
+				if (!drag) return;
+				if (drag.dragging) {
+					suppressClickRef.current = true;
+					setOffsetX((current) => (current < OPEN_X / 2 ? OPEN_X : 0));
+				}
+			}}
+			onPointerCancel={() => {
+				dragRef.current = null;
+				setOffsetX(0);
+			}}
+		>
+			{offsetX !== 0 && (
+				<button type="button" className="kc-home__delete" onClick={onDelete}>
+					Delete
+				</button>
+			)}
+			<button
+				type="button"
+				className="kc-home__item"
+				style={{ transform: `translateX(${offsetX}px)`, transition: dragRef.current ? "none" : "transform 160ms ease" }}
+				disabled={disabled}
+				onClick={() => {
+					if (suppressClickRef.current) {
+						suppressClickRef.current = false;
+						return; // the click that trails the swipe gesture itself
+					}
+					// A tap while swiped open closes the row; only a resting row opens.
+					if (offsetX !== 0) {
+						setOffsetX(0);
+						return;
+					}
+					onOpen();
+				}}
+			>
+				{thumbnail ? (
+					<img src={thumbnail} alt="" className="kc-home__thumb" />
+				) : (
+					<span className="kc-home__thumb kc-home__thumb--empty" />
+				)}
+				<span className="kc-home__meta">
+					<span className="kc-home__name">{name}</span>
+					<span className="kc-home__date">{new Date(updatedAt).toLocaleDateString()}</span>
+				</span>
+			</button>
+		</li>
 	);
 }
 

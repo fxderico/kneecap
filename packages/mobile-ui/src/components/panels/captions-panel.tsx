@@ -73,12 +73,6 @@ export function CaptionsPanel({ editor, onClose, onInserted }: CaptionsPanelProp
 				Generate transcribes your clip&apos;s audio on this device (zero network, zero cloud)
 				— the selected clip, or the first clip on the main track. Trims are respected.
 			</p>
-			<div className="cc-param-row">
-				<div className="cc-param-row__head">
-					<span className="cc-param-row__label">Language</span>
-				</div>
-				<SegmentedControl aria-label="Caption language" segments={LANGUAGES} activeId={language} onSelect={setLanguage} />
-			</div>
 			<button
 				type="button"
 				className="cc-panel-actions__btn"
@@ -94,6 +88,12 @@ export function CaptionsPanel({ editor, onClose, onInserted }: CaptionsPanelProp
 				</span>
 			</button>
 			{state === "error" && errorMessage && <p className="cc-panel-note">{errorMessage}</p>}
+			<div className="cc-param-row">
+				<div className="cc-param-row__head">
+					<span className="cc-param-row__label">Language</span>
+				</div>
+				<SegmentedControl aria-label="Caption language" segments={LANGUAGES} activeId={language} onSelect={setLanguage} />
+			</div>
 			<ChipRow
 				chips={STYLES}
 				activeIds={[stylePreset]}

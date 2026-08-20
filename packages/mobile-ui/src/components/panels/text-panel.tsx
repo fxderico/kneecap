@@ -39,6 +39,8 @@ export function TextPanel({ editor, elementRef, element, onClose, onAddText }: T
 	const italic = element?.params.fontStyle === "italic";
 	const backgroundEnabled = Boolean(element?.params["background.enabled"]);
 
+	const content = element && typeof element.params.content === "string" ? element.params.content : "";
+
 	return (
 		<PanelSheet onScrimClick={onClose} header={<SheetHeader onClose={onClose} />}>
 			<button type="button" className="cc-panel-actions__btn" onClick={onAddText}>
@@ -48,6 +50,25 @@ export function TextPanel({ editor, elementRef, element, onClose, onAddText }: T
 
 			{element && elementRef && (
 				<>
+					{/* Round 21 (founder: "text isn't editable when I add text"):
+					    the panel had every STYLE control but no way to change the
+					    words themselves. Live-bound to params.content — the same
+					    undoable UpdateElementsCommand path the style rows use. */}
+					<div className="cc-param-row">
+						<div className="cc-param-row__head">
+							<span className="cc-param-row__label">Text</span>
+						</div>
+						<textarea
+							className="cc-text-content-input"
+							rows={2}
+							value={content}
+							placeholder="Type your text…"
+							aria-label="Text content"
+							onChange={(event) =>
+								setElementParam({ editor, ref: elementRef, key: "content", value: event.target.value })
+							}
+						/>
+					</div>
 					<ChipRow
 						chips={fonts.map((f) => ({ id: f, label: f }))}
 						activeIds={[fontFamily]}

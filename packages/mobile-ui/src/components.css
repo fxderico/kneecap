@@ -147,7 +147,14 @@
 	display: flex;
 	flex-direction: column;
 	max-height: 70vh;
-	overflow: hidden;
+	/* Round 21: was `overflow: hidden`, which silently CLIPPED any panel
+	   content past 70vh with no scroll — on-device the Captions panel's
+	   Generate button was simply cut off (founder: "i dont see a
+	   generation button"). Sheets scroll now; radius clipping is
+	   preserved by overflow-y auto + hidden x. */
+	overflow-y: auto;
+	overflow-x: hidden;
+	-webkit-overflow-scrolling: touch;
 	/* M8 bugfix, found via real in-browser click testing (not caught by
 	   any prior visual-only check): CSS paints/hit-tests POSITIONED
 	   elements above NON-positioned siblings within the same stacking
@@ -1262,4 +1269,23 @@
 	border: 1px solid var(--cc-bg-raised);
 	cursor: pointer;
 	padding: 0;
+}
+
+/* Round 21: the Text panel's content editor (founder: "text isn't
+   editable when I add text" — the panel had styles but no words). */
+.cc-text-content-input {
+	width: 100%;
+	background: var(--cc-bg-raised, rgba(255, 255, 255, 0.06));
+	color: var(--cc-text-primary, #f5f5f5);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 10px;
+	padding: 10px 12px;
+	font-size: 15px;
+	font-family: inherit;
+	line-height: 1.35;
+	resize: none;
+	outline: none;
+}
+.cc-text-content-input:focus {
+	border-color: var(--cc-accent, #00cae0);
 }

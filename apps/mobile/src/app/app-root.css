@@ -199,3 +199,30 @@ body {
 	font-size: 13px;
 	margin: 0;
 }
+
+/* Round 21: swipe-to-delete on the project list. The row is a positioning
+   context; Delete sits behind the sliding item, revealed by swipe-left. */
+.kc-home__row {
+	position: relative;
+	overflow: hidden;
+	border-radius: 12px;
+}
+.kc-home__row .kc-home__item {
+	position: relative;
+	z-index: 1;
+	width: 100%;
+	background: inherit;
+}
+.kc-home__delete {
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	width: 84px;
+	border: none;
+	background: #d1435b;
+	color: #fff;
+	font-size: 14px;
+	font-weight: 600;
+	border-radius: 0 12px 12px 0;
+}
