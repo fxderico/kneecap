@@ -9,6 +9,7 @@ import type {
 	RetimeConfig,
 } from "@/timeline";
 import { calculateTotalDuration } from "@/timeline";
+import { applyTransitionsToSceneTracks } from "@/timeline/transitions";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { findTrackInSceneTracks } from "@/timeline/track-element-update";
 import { lastFrameMediaTime, type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
@@ -208,8 +209,53 @@ export class TimelineManager {
 			return ZERO_MEDIA_TIME;
 		}
 
-		return calculateTotalDuration({ tracks: activeScene.tracks });
+		// Transition-aware: transitions COMPRESS the timeline (each overlap
+		// shortens the output by its duration — MainTrackPlacement semantics),
+		// and playback/audio/export all consume this duration, so it must be
+		// the compressed one or playback runs past the content into black.
+		return calculateTotalDuration({
+			tracks: applyTransitionsToSceneTracks({
+				tracks: activeScene.tracks,
+				transitions: activeScene.transitions,
+			}),
+		});
 	}
+
+	/**
+	 * The tracks the RENDERER (and audio scheduler) should consume: the
+	 * preview-overlay tracks when a gesture is mid-flight, with main-track
+	 * transitions applied on top. Editing UI (the timeline strip, commands)
+	 * keeps reading the nominal tracks — transitions are a render-time
+	 * derivation, exactly like the native exporter treats them.
+	 *
+	 * Memoized on the (tracks, transitions) references so repeated calls
+	 * between mutations return the SAME object — React selector snapshots
+	 * (useSyncExternalStore) require referential stability or they loop.
+	 */
+	getRenderTracks(): SceneTracks | null {
+		const nominal = this.getPreviewTracks();
+		if (!nominal) return null;
+		const transitions = this.editor.scenes.getActiveSceneOrNull()?.transitions;
+		if (
+			this.renderTracksMemo &&
+			this.renderTracksMemo.input === nominal &&
+			this.renderTracksMemo.transitions === transitions
+		) {
+			return this.renderTracksMemo.output;
+		}
+		const output = applyTransitionsToSceneTracks({
+			tracks: nominal,
+			transitions,
+		});
+		this.renderTracksMemo = { input: nominal, transitions, output };
+		return output;
+	}
+
+	private renderTracksMemo: {
+		input: SceneTracks;
+		transitions: readonly import("@/timeline").TSceneTransition[] | undefined;
+		output: SceneTracks;
+	} | null = null;
 
 	getLastFrameTime(): MediaTime {
 		const duration = this.getTotalDuration();

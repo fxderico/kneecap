@@ -293,12 +293,13 @@ export interface EdlOverlay {
  * Transitions between adjacent main-track clips. CapCut only allows these on
  * the main track, and so does EDL v1.
  *
- * v1 PRODUCER STATUS: always `[]`. The inherited engine has no transition model
- * (there is no `transitions` field anywhere in `timeline/types.ts`), so
- * `buildEdl` cannot populate this yet. The slot is frozen into v1 deliberately
- * so that adding transitions later is a producer change, not a schema break
- * that invalidates both native mappers. Mappers should implement it now and
- * expect an empty array until then.
+ * v1 PRODUCER STATUS: LIVE since round 17. The engine's transition model is
+ * `TScene.transitions` (timeline/types.ts) and `buildEdl` emits it via
+ * `buildTransitions` — transitions targeting a deleted/non-adjacent clip are
+ * dropped (dormant) rather than emitted, because the native mapper
+ * (MainTrackPlacement.swift) throws on those. Preview renders the same
+ * placements through `timeline/transitions.ts`, the TS port of that Swift
+ * math.
  */
 export interface EdlTransition {
 	transitionId: string;

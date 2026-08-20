@@ -150,7 +150,12 @@ export class RendererManager {
 		const { format, quality, fps, includeAudio } = options;
 
 		try {
-			const tracks = this.editor.scenes.getActiveScene().tracks;
+			// Transition-applied render tracks — the (web) export must show the
+			// same compressed, cross-faded timeline the preview and the native
+			// exporter produce.
+			const tracks =
+				this.editor.timeline.getRenderTracks() ??
+				this.editor.scenes.getActiveScene().tracks;
 			const mediaAssets = this.editor.media.getAssets();
 			const activeProject = this.editor.project.getActive();
 

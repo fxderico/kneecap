@@ -10,6 +10,7 @@ export * from "./audio-separation";
 export * from "./zoom-utils";
 export * from "./ruler-utils";
 export * from "./pixel-utils";
+export * from "./transitions";
 
 export function calculateTotalDuration({
 	tracks,

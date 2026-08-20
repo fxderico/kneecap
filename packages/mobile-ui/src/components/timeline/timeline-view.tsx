@@ -37,7 +37,7 @@ export interface TimelineViewHandle {
 	seek: (params: { timeSec: number }) => void;
 }
 
-interface Transition {
+export interface Transition {
 	kind: string;
 	durationSec: number;
 }
@@ -90,6 +90,19 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	/** Helper chips left of the main track's first clip (Mute clip audio /
 	 *  AI clipper / Cover in CapCut). */
 	leadingChips?: React.ReactNode;
+	/** ENGINE-BACKED transitions (round 17): when provided, the squares and
+	 *  the sheet read from here and every edit goes through
+	 *  `onTransitionCommit` (the shell turns it into an undoable
+	 *  TransitionsSnapshotCommand). When absent (the M7 dev harness), the
+	 *  original local view-model state still applies so the bare surface
+	 *  keeps working. Keyed by the clip the transition FOLLOWS. */
+	transitions?: Record<string, Transition>;
+	onTransitionCommit?: (params: {
+		afterClipId: string;
+		kind: string;
+		durationSec: number;
+		applyToAll: boolean;
+	}) => void;
 }>(function TimelineView(
 	{
 		project,
@@ -105,6 +118,8 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		onQuickAddAudio,
 		onQuickAddText,
 		leadingChips,
+		transitions: transitionsProp,
+		onTransitionCommit,
 	},
 	ref,
 ) {
@@ -114,7 +129,10 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 	const [trimPreview, setTrimPreview] = useState<TrimPreview | null>(null);
 	const [snapIndicatorSec, setSnapIndicatorSec] = useState<number | null>(null);
-	const [transitions, setTransitions] = useState<Record<string, Transition>>({});
+	const [localTransitions, setLocalTransitions] = useState<Record<string, Transition>>({});
+	// Engine-backed when the shell provides them; local view-model otherwise
+	// (dev harness). All reads below go through `transitions`.
+	const transitions = transitionsProp ?? localTransitions;
 	const [openTransitionAfterClipId, setOpenTransitionAfterClipId] = useState<
 		string | null
 	>(null);
@@ -447,6 +465,7 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 			{openTransitionNeighbors && openTransitionAfterClipId && (
 				<TransitionSheet
 					afterClipId={openTransitionAfterClipId}
+					initialKind={transitions[openTransitionAfterClipId]?.kind}
 					initialDurationSec={
 						transitions[openTransitionAfterClipId]?.durationSec ??
 						DEFAULT_TRANSITION_DURATION_SEC
@@ -457,16 +476,28 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 					)}
 					onConfirm={({ afterClipId, kind, durationSec, applyToAll }) => {
 						hapticTick();
-						setTransitions((prev) => {
-							if (!applyToAll || !mainTrack) {
-								return { ...prev, [afterClipId]: { kind, durationSec } };
-							}
-							const next = { ...prev };
-							for (let i = 0; i < mainTrack.clips.length - 1; i++) {
-								next[mainTrack.clips[i].id] = { kind, durationSec };
-							}
-							return next;
-						});
+						if (onTransitionCommit) {
+							onTransitionCommit({ afterClipId, kind, durationSec, applyToAll });
+						} else {
+							setLocalTransitions((prev) => {
+								const applyOne = (
+									next: Record<string, Transition>,
+									id: string,
+								) => {
+									if (kind === "none") delete next[id];
+									else next[id] = { kind, durationSec };
+								};
+								const next = { ...prev };
+								if (!applyToAll || !mainTrack) {
+									applyOne(next, afterClipId);
+									return next;
+								}
+								for (let i = 0; i < mainTrack.clips.length - 1; i++) {
+									applyOne(next, mainTrack.clips[i].id);
+								}
+								return next;
+							});
+						}
 						setOpenTransitionAfterClipId(null);
 					}}
 					onClose={() => setOpenTransitionAfterClipId(null)}

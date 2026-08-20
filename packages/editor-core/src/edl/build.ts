@@ -43,6 +43,7 @@ import {
 	type EdlTrack,
 	type EdlTrackType,
 	type EdlTransform,
+	type EdlTransition,
 } from "./types";
 
 /** Bumped alongside the package version; surfaced in `meta.generator`. */
@@ -510,12 +511,51 @@ export function buildEdl({
 		},
 		assets: buildAssets({ mediaAssets, resolveAsset }),
 		tracks,
-		// See EdlTransition's doc comment: the slot is frozen into v1, the
-		// producer is empty until the engine grows a transition model.
-		transitions: [],
+		transitions: buildTransitions({ scene }),
 		overlays,
 		output: edlOutput,
 	};
+}
+
+/**
+ * Main-track transitions from the scene model (`TScene.transitions`). The
+ * native mapper (MainTrackPlacement.swift) THROWS on a transition whose
+ * afterClipId is unknown or not immediately followed by another main-track
+ * clip, so the producer drops those defensively here — a transition whose
+ * neighbor was deleted goes dormant instead of failing the export. Kinds
+ * pass through as authored: "fade" maps to the compositor's canonical
+ * "cross_fade"; every other kind is carried verbatim and falls back to the
+ * same dissolve on the native side (its documented behavior) — matching the
+ * preview, which also renders every kind as a cross-fade in v1.
+ */
+function buildTransitions({ scene }: { scene: TScene }): EdlTransition[] {
+	const transitions = scene.transitions ?? [];
+	if (transitions.length === 0) return [];
+
+	const mainElements = [...scene.tracks.main.elements]
+		.filter((element) => !("hidden" in element && element.hidden))
+		.sort((a, b) =>
+			a.startTime !== b.startTime
+				? a.startTime - b.startTime
+				: a.id.localeCompare(b.id),
+		);
+	const indexById = new Map<string, number>();
+	mainElements.forEach((element, index) => indexById.set(element.id, index));
+
+	const out: EdlTransition[] = [];
+	for (const transition of transitions) {
+		const index = indexById.get(transition.afterElementId);
+		if (index === undefined || index + 1 >= mainElements.length) continue;
+		if (!Number.isInteger(transition.duration) || transition.duration <= 0) continue;
+		out.push({
+			transitionId: transition.id,
+			afterClipId: transition.afterElementId,
+			kind: transition.kind === "fade" ? "cross_fade" : transition.kind,
+			durationTicks: transition.duration,
+		});
+	}
+	out.sort((a, b) => a.afterClipId.localeCompare(b.afterClipId));
+	return out;
 }
 
 /**

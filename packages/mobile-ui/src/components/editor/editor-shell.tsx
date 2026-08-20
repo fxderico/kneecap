@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { TICKS_PER_SECOND } from "@kneecap/editor-core";
 import { cn } from "../../lib/cn";
 import { isVisualElement, type VisualElement } from "@kneecap/editor-core/timeline";
 import { TopBar } from "./top-bar";
@@ -25,6 +26,7 @@ import {
 	useCurrentTimeSeconds,
 	useIsPlaying,
 	useProjectDurationSeconds,
+	useSceneTransitions,
 } from "../../editor/use-live-editor";
 import { bootstrapDemoProject } from "../../editor/demo-project";
 import { useTimelineProjectVM } from "../../editor/use-timeline-project-vm";
@@ -38,6 +40,7 @@ import {
 	selectElement,
 	insertTextElement,
 	insertOverlayShape,
+	setMainTrackTransition,
 	togglePlayback,
 	seekToSeconds,
 	importAndPlaceMedia,
@@ -163,6 +166,20 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 	} | null>(null);
 	const timelineProject = useTimelineProjectVM();
 
+	// Engine-backed transitions -> the TimelineView's Record<afterClipId, vm>
+	// shape (ticks -> seconds). Memoized on the stable engine array.
+	const sceneTransitions = useSceneTransitions();
+	const transitionsVM = useMemo(() => {
+		const vm: Record<string, { kind: string; durationSec: number }> = {};
+		for (const transition of sceneTransitions) {
+			vm[transition.afterElementId] = {
+				kind: transition.kind,
+				durationSec: transition.duration / TICKS_PER_SECOND,
+			};
+		}
+		return vm;
+	}, [sceneTransitions]);
+
 	const reportChromeError = (error: unknown) => {
 		setChromeError(error instanceof Error ? error.message : String(error));
 	};
@@ -234,6 +251,16 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						onTimeChange={({ timeSec }) => seekToSeconds({ editor, seconds: timeSec })}
 						onSelectClip={({ clipId, trackId }) =>
 							selectElement({ editor, ref: { trackId, elementId: clipId } })
+						}
+						transitions={transitionsVM}
+						onTransitionCommit={({ afterClipId, kind, durationSec, applyToAll }) =>
+							setMainTrackTransition({
+								editor,
+								afterElementId: afterClipId,
+								kind,
+								durationSec,
+								applyToAll,
+							})
 						}
 						currentTimeLabel={`${formatTimecode(currentTimeSeconds)} / ${formatTimecode(durationSeconds)}`}
 						playbackTimeSec={currentTimeSeconds}

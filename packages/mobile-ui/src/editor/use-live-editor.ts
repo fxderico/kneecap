@@ -87,3 +87,9 @@ export function useProjectDurationSeconds(): number {
 		return mediaTimeToSeconds({ time: calculateTotalDuration({ tracks }) });
 	});
 }
+
+/** Live main-track transitions of the active scene (engine-backed; stable
+ *  empty array when none — see ScenesManager.getActiveTransitions). */
+export function useSceneTransitions() {
+	return useEditor((editor) => editor.scenes.getActiveTransitions());
+}

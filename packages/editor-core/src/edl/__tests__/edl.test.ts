@@ -226,8 +226,38 @@ describe("buildEdl", () => {
 		});
 	});
 
-	test("emits no transitions — the engine has no transition model yet", () => {
+	test("emits no transitions for a scene without any", () => {
 		expect(buildFixtureEdl().transitions).toEqual([]);
+	});
+
+	test("emits scene transitions (round 17: the producer is live), dropping dormant ones", () => {
+		const scene = {
+			...buildFixtureScene(),
+			transitions: [
+				// real: clip-a is immediately followed by clip-b on main
+				{ id: "tr-1", afterElementId: "clip-a", kind: "fade", duration: 24_000 as never },
+				// dormant: target clip does not exist — native mapper would throw
+				{ id: "tr-2", afterElementId: "deleted-clip", kind: "fade", duration: 24_000 as never },
+				// dormant: clip-b is the LAST main clip, nothing follows it
+				{ id: "tr-3", afterElementId: "clip-b", kind: "zoom", duration: 24_000 as never },
+			],
+		};
+		const edl = buildEdl({
+			project: buildFixtureProject(),
+			scene,
+			mediaAssets: buildFixtureMediaAssets(),
+			output: FIXTURE_OUTPUT,
+			resolveAsset: fixtureAssetResolver,
+		});
+		expect(edl.transitions).toEqual([
+			{
+				transitionId: "tr-1",
+				afterClipId: "clip-a",
+				// "fade" maps to the native compositor's canonical kind
+				kind: "cross_fade",
+				durationTicks: 24_000,
+			},
+		]);
 	});
 
 	test("is deterministic: two builds of the same graph are byte-identical", () => {

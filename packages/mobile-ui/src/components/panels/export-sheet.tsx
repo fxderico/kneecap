@@ -108,6 +108,22 @@ export function ExportSheet({ editor, onClose }: ExportSheetProps) {
 	// a re-render.
 	const activeExportRef = useRef<AsyncGenerator<ExportProgress> | null>(null);
 
+	// LOUD preflight for the known exporter gap (round 17): the native
+	// renderer composites text/sticker/graphic overlays but has NO path for
+	// video/image clips on overlay tracks — they render in the preview and
+	// silently vanish from the file. Until PiP export lands, name it in the
+	// sheet instead of letting the export lie by omission.
+	const droppedOverlayCount = editor.scenes
+		.getActiveScene()
+		.tracks.overlay.reduce(
+			(count, track) =>
+				count +
+				track.elements.filter(
+					(element) => element.type === "video" || element.type === "image",
+				).length,
+			0,
+		);
+
 	const applyResolution = (id: string) => {
 		setResolutionId(id);
 		const preset = RESOLUTIONS.find((r) => r.id === id);
@@ -263,6 +279,14 @@ export function ExportSheet({ editor, onClose }: ExportSheetProps) {
 					</p>
 				)}
 				{previewError && <p className="cc-panel-note">EDL preview failed: {previewError}</p>}
+				{droppedOverlayCount > 0 && (
+					<p className="cc-panel-note" role="alert">
+						⚠️ {droppedOverlayCount} video/image overlay clip
+						{droppedOverlayCount === 1 ? "" : "s"} will NOT appear in the export
+						yet — picture-in-picture export isn&apos;t built. Text, sticker and
+						shape overlays export fine.
+					</p>
+				)}
 
 				<button
 					type="button"

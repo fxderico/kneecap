@@ -21,6 +21,7 @@ import {
 	RemoveClipEffectCommand,
 	ToggleClipEffectCommand,
 	UpdateProjectSettingsCommand,
+	TransitionsSnapshotCommand,
 } from "@kneecap/editor-core/commands";
 import {
 	buildTextElement,
@@ -38,6 +39,7 @@ import {
 	importMediaFromNative,
 	mediaTimeFromSeconds,
 	resolveNativeMediaRawPath,
+	TICKS_PER_SECOND,
 	ZERO_MEDIA_TIME,
 	type MediaTime,
 	type NativeImportProgress,
@@ -149,6 +151,64 @@ export function setElementParam({
 /** Speed panel control: flat multiplier + Maintain Pitch, both real
  *  `RetimeConfig` fields consumed by `@/retime` (soundtouchjs pitch shift
  *  at `retime/audio-stretch.ts`, already implemented per plan M8 item 3). */
+/**
+ * Set / replace / remove ("none") the main-track transition after a clip —
+ * one undoable TransitionsSnapshotCommand per confirm, apply-to-all
+ * included. Durations arrive in the sheet's seconds and are stored as ticks
+ * (the engine's MediaTime); the placement math clamps at render/export time,
+ * so an over-long duration is stored as asked and simply clamps live.
+ */
+export function setMainTrackTransition({
+	editor,
+	afterElementId,
+	kind,
+	durationSec,
+	applyToAll,
+}: {
+	editor: EditorCore;
+	afterElementId: string;
+	kind: string;
+	durationSec: number;
+	applyToAll: boolean;
+}): void {
+	const before = editor.scenes.getActiveTransitions();
+	const mainElements = [...editor.scenes.getActiveScene().tracks.main.elements]
+		.filter((element) => !("hidden" in element && element.hidden))
+		.sort((a, b) =>
+			a.startTime !== b.startTime
+				? a.startTime - b.startTime
+				: a.id.localeCompare(b.id),
+		);
+	const targets = applyToAll
+		? mainElements.slice(0, -1).map((element) => element.id)
+		: [afterElementId];
+
+	const byAfterId = new Map(before.map((t) => [t.afterElementId, t]));
+	const durationTicks = mediaTimeFromSeconds({
+		seconds: Math.max(1 / TICKS_PER_SECOND, durationSec),
+	});
+	for (const id of targets) {
+		if (kind === "none") {
+			byAfterId.delete(id);
+		} else {
+			byAfterId.set(id, {
+				id: byAfterId.get(id)?.id ?? `transition-${id}`,
+				afterElementId: id,
+				kind,
+				duration: durationTicks,
+			});
+		}
+	}
+
+	const after = [...byAfterId.values()];
+	if (after.length === before.length && after.every((t, i) => t === before[i])) {
+		return; // nothing changed — don't pollute the undo stack
+	}
+	editor.command.execute({
+		command: new TransitionsSnapshotCommand({ before, after }),
+	});
+}
+
 export function setRetime({
 	editor,
 	ref,

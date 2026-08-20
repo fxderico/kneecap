@@ -7,6 +7,7 @@ import { SegmentedControl } from "../segmented-control";
 import { formatClipDuration } from "./timeline-clip";
 
 const TRANSITION_KINDS = [
+	{ id: "none", label: "None" },
 	{ id: "fade", label: "Fade" },
 	{ id: "slide", label: "Slide" },
 	{ id: "zoom", label: "Zoom" },
@@ -21,24 +22,24 @@ const TRANSITION_KINDS = [
  * (corpus 05 §5's own caveat: "cuts on separate tracks and overlay clips
  * may not change").
  *
- * IMPORTANT HONESTY NOTE: `onConfirm` updates only this component tree's
- * own local view-model state (see timeline-view.tsx's `transitions` state).
- * `packages/editor-core/src/edl/types.ts`'s `EdlTransition` producer status
- * is explicitly frozen at "always []" (that file's own comment: "the
- * inherited engine has no transition model") — so a transition applied
- * here is NOT yet visible in `buildEdl()` output or in the actual preview
- * renderer. Wiring a real transition data model into editor-core is a
- * separate, not-yet-scoped piece of work; this sheet is real, tested UI
- * with nothing real underneath it yet.
+ * Round 17: this sheet is now REAL — the shell commits confirms into the
+ * engine's `TScene.transitions` (undoable TransitionsSnapshotCommand),
+ * which drives BOTH the preview (timeline/transitions.ts placement +
+ * cross-fade) and the native export (buildEdl -> MainTrackPlacement.swift).
+ * "None" removes the transition. v1 renders every kind as a cross-fade in
+ * preview and export alike (the native compositor's documented fallback);
+ * the kind is stored so richer renders slot in later.
  */
 export function TransitionSheet({
 	afterClipId,
+	initialKind,
 	initialDurationSec,
 	maxDurationSec,
 	onConfirm,
 	onClose,
 }: {
 	afterClipId: string;
+	initialKind?: string;
 	initialDurationSec: number;
 	maxDurationSec: number;
 	onConfirm: (params: {
@@ -49,7 +50,11 @@ export function TransitionSheet({
 	}) => void;
 	onClose: () => void;
 }) {
-	const [kind, setKind] = useState(TRANSITION_KINDS[0].id);
+	const [kind, setKind] = useState(
+		initialKind && TRANSITION_KINDS.some((k) => k.id === initialKind)
+			? initialKind
+			: TRANSITION_KINDS[0].id,
+	);
 	const [durationSec, setDurationSec] = useState(
 		Math.min(initialDurationSec, maxDurationSec),
 	);

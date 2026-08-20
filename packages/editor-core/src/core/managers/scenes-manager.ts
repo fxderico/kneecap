@@ -1,5 +1,5 @@
 import type { EditorCore } from "@/core";
-import type { Bookmark, SceneTracks, TScene } from "@/timeline";
+import type { Bookmark, SceneTracks, TScene, TSceneTransition } from "@/timeline";
 import { storageService } from "@/services/storage/service";
 import {
 	getMainScene,
@@ -321,4 +321,52 @@ export class ScenesManager {
 			this.editor.project.setActiveProject({ project: updatedProject });
 		}
 	}
+
+	/** Main-track transitions of the active scene ([] when none / no scene).
+	 *  Returns a stable EMPTY constant for the none case — React selector
+	 *  snapshots require referential stability. */
+	getActiveTransitions(): TSceneTransition[] {
+		return this.active?.transitions ?? NO_TRANSITIONS;
+	}
+
+	/**
+	 * Replace the active scene's transitions — same persistence shape as
+	 * updateSceneTracks above (new scene object, list + active swapped,
+	 * project resaved). Mutations go through TransitionsSnapshotCommand so
+	 * they are undoable.
+	 */
+	updateSceneTransitions({
+		transitions,
+	}: {
+		transitions: TSceneTransition[];
+	}): void {
+		if (!this.active) return;
+
+		const updatedScene: TScene = {
+			...this.active,
+			transitions,
+			updatedAt: new Date(),
+		};
+
+		this.list = this.list.map((s) =>
+			s.id === this.active?.id ? updatedScene : s,
+		);
+		this.active = updatedScene;
+		this.notify();
+
+		const activeProject = this.editor.project.getActive();
+		if (activeProject) {
+			const updatedProject = {
+				...activeProject,
+				scenes: this.list,
+				metadata: {
+					...activeProject.metadata,
+					updatedAt: new Date(),
+				},
+			};
+			this.editor.project.setActiveProject({ project: updatedProject });
+		}
+	}
 }
+
+const NO_TRANSITIONS: TSceneTransition[] = [];

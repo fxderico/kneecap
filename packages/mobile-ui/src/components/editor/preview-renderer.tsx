@@ -15,8 +15,12 @@
  *      neither the frame index nor the tree changed (same guard as web).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import { TICKS_PER_SECOND } from "@kneecap/editor-core";
 import { useEditor } from "@kneecap/editor-core/react";
+import { isVisualElement } from "@kneecap/editor-core/timeline";
+import type { ParamValues } from "@kneecap/editor-core/params";
+import { useSelectedElement } from "../../editor/use-live-editor";
 import { CanvasRenderer } from "@kneecap/editor-core/services/renderer/canvas-renderer";
 import { buildScene } from "@kneecap/editor-core/services/renderer/scene-builder";
 import type { RootNode } from "@kneecap/editor-core/services/renderer/nodes/root-node";
@@ -71,8 +75,10 @@ export function PreviewRenderer() {
 function PreviewRendererInner() {
 	const editor = useEditor();
 	const activeProject = useEditor((e) => e.project.getActive());
+	// Render tracks = preview-overlay tracks + main-track transitions applied
+	// (memoized in the manager, so this snapshot is referentially stable).
 	const tracks = useEditor(
-		(e) => e.timeline.getPreviewTracks() ?? e.scenes.getActiveScene().tracks,
+		(e) => e.timeline.getRenderTracks() ?? e.scenes.getActiveScene().tracks,
 	);
 	const mediaAssets = useEditor((e) => e.media.getAssets());
 	const renderTree = useEditor((e) => e.renderer.getRenderTree());
@@ -158,5 +164,228 @@ function PreviewRendererInner() {
 		return () => cancelAnimationFrame(rafId);
 	}, [renderFrame]);
 
-	return <div ref={mountRef} className="cc-preview-stage__render" />;
+	const gestureHandlers = usePreviewTransformGesture({
+		mountRef,
+		canvasWidth: width,
+	});
+
+	return (
+		<div
+			ref={mountRef}
+			className="cc-preview-stage__render"
+			style={{ touchAction: "none" }}
+			{...gestureHandlers}
+		/>
+	);
+}
+
+/**
+ * CapCut-style direct manipulation on the preview (round 17, founder ask
+ * "when I highlight a clip I should be able to move it around in the
+ * frame"): with a visual element selected, one finger drags it
+ * (`transform.positionX/Y`, canvas units) and a second finger pinches to
+ * scale (`transform.scaleX/Y`, sign-preserving). Mid-gesture frames go
+ * through the engine's preview overlay (`timeline.previewElements`) — the
+ * same live-without-committing path the web transform handles use — and
+ * the release commits ONE undoable TracksSnapshotCommand
+ * (`timeline.commitPreview`).
+ *
+ * Tap-to-toggle-playback (PreviewStage's onPointerUp) keeps working: the
+ * gesture only claims the pointer once movement crosses a slop threshold,
+ * and only a real drag stops the up-event from bubbling to the stage.
+ */
+const DRAG_SLOP_PX = 6;
+
+function usePreviewTransformGesture({
+	mountRef,
+	canvasWidth,
+}: {
+	mountRef: RefObject<HTMLDivElement | null>;
+	canvasWidth: number;
+}) {
+	const editor = useEditor();
+	const [selectedRef, selectedElement] = useSelectedElement();
+
+	// Anchor values are the element's transform at the LAST pointer-topology
+	// change (gesture start, finger added, finger lifted); deltas are always
+	// measured from the geometry captured at that same moment, so adding or
+	// removing a finger never makes the element jump.
+	const sessionRef = useRef<{
+		pointers: Map<number, { x: number; y: number }>;
+		startCentroid: { x: number; y: number };
+		startDistance: number | null;
+		initialParams: ParamValues;
+		anchorPositionX: number;
+		anchorPositionY: number;
+		anchorScaleX: number;
+		anchorScaleY: number;
+		dragging: boolean;
+		target: { trackId: string; elementId: string };
+	} | null>(null);
+
+	const canManipulate =
+		selectedRef !== null &&
+		selectedElement !== null &&
+		isVisualElement(selectedElement);
+
+	const readNumber = (params: ParamValues, key: string, fallback: number) => {
+		const value = params[key];
+		return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+	};
+
+	const centroidAndDistance = (pointers: Map<number, { x: number; y: number }>) => {
+		const points = [...pointers.values()];
+		const centroid = {
+			x: points.reduce((sum, p) => sum + p.x, 0) / points.length,
+			y: points.reduce((sum, p) => sum + p.y, 0) / points.length,
+		};
+		const distance =
+			points.length >= 2
+				? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+				: null;
+		return { centroid, distance };
+	};
+
+	const pxToCanvas = () => {
+		const rect = mountRef.current?.getBoundingClientRect();
+		// The mount is rendered at the canvas's own aspect ratio (PreviewStage
+		// sizes it), so one uniform factor maps CSS px -> canvas units.
+		return rect && rect.width > 0 ? canvasWidth / rect.width : 0;
+	};
+
+	type Session = NonNullable<typeof sessionRef.current>;
+
+	/** The element's effective transform under the current pointer deltas. */
+	const currentTransform = (session: Session) => {
+		const scale = pxToCanvas();
+		const { centroid, distance } = centroidAndDistance(session.pointers);
+		const factor =
+			distance !== null && session.startDistance && session.startDistance > 0
+				? distance / session.startDistance
+				: 1;
+		return {
+			positionX: session.anchorPositionX + (centroid.x - session.startCentroid.x) * scale,
+			positionY: session.anchorPositionY + (centroid.y - session.startCentroid.y) * scale,
+			scaleX: session.anchorScaleX * factor,
+			scaleY: session.anchorScaleY * factor,
+		};
+	};
+
+	/** Re-anchor after a finger joins/leaves: bank the current transform and
+	 *  restart deltas from the new pointer geometry. */
+	const reanchor = (session: Session) => {
+		const current = currentTransform(session);
+		session.anchorPositionX = current.positionX;
+		session.anchorPositionY = current.positionY;
+		session.anchorScaleX = current.scaleX;
+		session.anchorScaleY = current.scaleY;
+		const { centroid, distance } = centroidAndDistance(session.pointers);
+		session.startCentroid = centroid;
+		session.startDistance = distance;
+	};
+
+	const applySessionUpdate = () => {
+		const session = sessionRef.current;
+		if (!session || session.pointers.size === 0 || pxToCanvas() === 0) return;
+		const current = currentTransform(session);
+		const params: ParamValues = {
+			...session.initialParams,
+			"transform.positionX": current.positionX,
+			"transform.positionY": current.positionY,
+			"transform.scaleX": current.scaleX,
+			"transform.scaleY": current.scaleY,
+		};
+		editor.timeline.previewElements({
+			updates: [
+				{
+					trackId: session.target.trackId,
+					elementId: session.target.elementId,
+					updates: { params },
+				},
+			],
+		});
+	};
+
+	const endSession = (commit: boolean) => {
+		const session = sessionRef.current;
+		if (!session) return false;
+		const dragged = session.dragging;
+		sessionRef.current = null;
+		if (dragged && commit) {
+			editor.timeline.commitPreview();
+		} else if (dragged) {
+			editor.timeline.discardPreview();
+		}
+		return dragged;
+	};
+
+	if (!canManipulate) {
+		// No selection: keep the surface inert so taps reach the stage's
+		// play/pause handler untouched. Any half-open session is discarded.
+		if (sessionRef.current) endSession(false);
+		return {};
+	}
+
+	return {
+		onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
+			const existing = sessionRef.current;
+			if (existing) {
+				existing.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+				reanchor(existing);
+				return;
+			}
+			if (!selectedRef || !selectedElement) return;
+			sessionRef.current = {
+				pointers: new Map([
+					[event.pointerId, { x: event.clientX, y: event.clientY }],
+				]),
+				startCentroid: { x: event.clientX, y: event.clientY },
+				startDistance: null,
+				initialParams: selectedElement.params,
+				anchorPositionX: readNumber(selectedElement.params, "transform.positionX", 0),
+				anchorPositionY: readNumber(selectedElement.params, "transform.positionY", 0),
+				anchorScaleX: readNumber(selectedElement.params, "transform.scaleX", 1),
+				anchorScaleY: readNumber(selectedElement.params, "transform.scaleY", 1),
+				dragging: false,
+				target: {
+					trackId: selectedRef.trackId,
+					elementId: selectedRef.elementId,
+				},
+			};
+		},
+		onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
+			const session = sessionRef.current;
+			if (!session || !session.pointers.has(event.pointerId)) return;
+			session.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+			if (!session.dragging) {
+				const { centroid } = centroidAndDistance(session.pointers);
+				const moved = Math.hypot(
+					centroid.x - session.startCentroid.x,
+					centroid.y - session.startCentroid.y,
+				);
+				if (moved < DRAG_SLOP_PX && session.pointers.size < 2) return;
+				session.dragging = true;
+				event.currentTarget.setPointerCapture(event.pointerId);
+			}
+			applySessionUpdate();
+		},
+		onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => {
+			const session = sessionRef.current;
+			if (!session || !session.pointers.has(event.pointerId)) return;
+			session.pointers.delete(event.pointerId);
+			if (session.pointers.size > 0) {
+				reanchor(session);
+				return;
+			}
+			const dragged = endSession(true);
+			if (dragged) {
+				// A real drag must not double as a tap: swallow it before
+				// PreviewStage's onPointerUp toggles playback.
+				event.stopPropagation();
+			}
+		},
+		onPointerCancel: () => {
+			endSession(false);
+		},
+	};
 }

@@ -21,9 +21,30 @@ export interface TScene {
 	name: string;
 	isMain: boolean;
 	tracks: SceneTracks;
+	/**
+	 * Main-track transitions, keyed by the clip they FOLLOW (must be
+	 * immediately followed by another main-track clip). Optional so scenes
+	 * persisted before transitions existed load unchanged (undefined == []).
+	 * Semantics are the native exporter's (MainTrackPlacement.swift): the
+	 * incoming clip is pulled earlier by the transition duration so the two
+	 * overlap — the timeline COMPRESSES by that duration.
+	 */
+	transitions?: TSceneTransition[];
 	bookmarks: Bookmark[];
 	createdAt: Date;
 	updatedAt: Date;
+}
+
+export interface TSceneTransition {
+	id: string;
+	/** The main-track element this transition follows. */
+	afterElementId: string;
+	/** "fade" | "slide" | "zoom" — v1 renders every kind as a cross-fade in
+	 *  both preview and native export (the Swift compositor's documented
+	 *  fallback); the kind is carried so richer renders slot in later. */
+	kind: string;
+	/** Overlap duration in ticks (MediaTime). */
+	duration: MediaTime;
 }
 
 export type TrackType =

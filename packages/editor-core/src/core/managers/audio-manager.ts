@@ -301,7 +301,13 @@ export class AudioManager {
 		this.playbackSessionId++;
 		this.playbackLatencyCompensationSeconds = 0;
 
-		const tracks = this.editor.scenes.getActiveScene().tracks;
+		// Render tracks, not nominal ones: transitions shift main-track clips
+		// (and remap overlay/audio starts) — audio scheduled at nominal time
+		// would drift out of sync with the compressed video by exactly each
+		// transition's duration.
+		const tracks =
+			this.editor.timeline.getRenderTracks() ??
+			this.editor.scenes.getActiveScene().tracks;
 		const mediaAssets = this.editor.media.getAssets();
 		const duration = this.editor.timeline.getTotalDuration();
 
