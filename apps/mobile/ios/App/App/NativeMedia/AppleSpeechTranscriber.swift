@@ -146,13 +146,110 @@ public enum AppleSpeechTranscriber {
 	}
 
 	/// The recognition half, over a PLAIN AUDIO file (see extractAudio).
+	///
+	/// ROUND 21.3, from the founder's device trail ("recognized 1 raw
+	/// words" for a clip full of speech, extraction healthy at 3MB):
+	/// `SFSpeechURLRecognitionRequest` + `requiresOnDeviceRecognition` is
+	/// KNOWN-unreliable on iOS for file input (fine on macOS — why the
+	/// harness passed). Two engines now:
+	///   1. iOS/macOS 26+: Apple's `SpeechAnalyzer`/`SpeechTranscriber` —
+	///      the new API built for exactly this (what Voice Memos uses).
+	///   2. Everywhere else / on any 26-path failure: the community-proven
+	///      workaround — feed the file as PCM buffers through
+	///      `SFSpeechAudioBufferRecognitionRequest` with partials on,
+	///      keeping the richest transcription seen.
 	static func recognize(
 		audioFileURL url: URL,
 		languageHint: String?,
 		completion: @escaping (Result<[String: Any], AppleSpeechTranscriberError>) -> Void
 	) {
-
 		let localeId = languageHint ?? "en-US"
+		if #available(iOS 26.0, macOS 26.0, *) {
+			Task {
+				do {
+					let payload = try await recognizeWithSpeechAnalyzer(url: url, localeId: localeId)
+					completion(.success(payload))
+				} catch {
+					print("[kneecap-stt] SpeechAnalyzer path failed (\(error)) — falling back to SFSpeech buffer path")
+					recognizeWithBufferRequest(url: url, localeId: localeId, completion: completion)
+				}
+			}
+		} else {
+			recognizeWithBufferRequest(url: url, localeId: localeId, completion: completion)
+		}
+	}
+
+	/// iOS 26+ engine: SpeechAnalyzer + SpeechTranscriber with audio time
+	/// ranges. Ensures the locale's model asset is installed first (a
+	/// system-managed, one-time download shared across apps — the same
+	/// model dictation uses).
+	@available(iOS 26.0, macOS 26.0, *)
+	static func recognizeWithSpeechAnalyzer(url: URL, localeId: String) async throws -> [String: Any] {
+		let locale = Locale(identifier: localeId)
+		let transcriber = SpeechTranscriber(
+			locale: locale,
+			transcriptionOptions: [],
+			reportingOptions: [],
+			attributeOptions: [.audioTimeRange]
+		)
+		if let installRequest = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+			print("[kneecap-stt] SpeechAnalyzer: downloading locale model asset…")
+			try await installRequest.downloadAndInstall()
+		}
+
+		let analyzer = SpeechAnalyzer(modules: [transcriber])
+		let audioFile = try AVAudioFile(forReading: url)
+
+		// Consume results concurrently with feeding — the transcriber's
+		// results stream ends when the analyzer finishes.
+		async let collected: [(String, Double, Double)] = {
+			var words: [(String, Double, Double)] = []
+			for try await result in transcriber.results {
+				guard result.isFinal else { continue }
+				for run in result.text.runs {
+					let text = String(result.text[run.range].characters)
+					if let timeRange = run.audioTimeRange {
+						words.append((text, timeRange.start.seconds, timeRange.duration.seconds))
+					} else if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+						words.append((text, -1, 0))
+					}
+				}
+			}
+			return words
+		}()
+
+		if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
+			try await analyzer.finalizeAndFinish(through: lastSample)
+		} else {
+			await analyzer.cancelAndFinishNow()
+		}
+
+		let rawRuns = try await collected
+		// Runs are word/phrase fragments incl. bare whitespace; keep timed,
+		// non-empty ones. Untimed fragments inherit a zero-length envelope at
+		// the previous word's end (smoothing downstream fixes overlaps).
+		var words: [RecognizedWord] = []
+		var cursor: Double = 0
+		for (text, start, duration) in rawRuns {
+			let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+			if trimmed.isEmpty { continue }
+			let startSec = start >= 0 ? start : cursor
+			words.append(RecognizedWord(text: trimmed, startSeconds: startSec, durationSeconds: max(0, duration), confidence: 0))
+			cursor = startSec + max(0, duration)
+		}
+		let fullText = words.map(\.text).joined(separator: " ")
+		print("[kneecap-stt] SpeechAnalyzer recognized \(words.count) words")
+		return wireResult(words: words, fullText: fullText)
+	}
+
+	/// Pre-26 engine: the buffer-request workaround. Partials ON and the
+	/// richest transcription kept — on-device file recognition is known to
+	/// deliver good partials and then a poorer (even empty) final.
+	static func recognizeWithBufferRequest(
+		url: URL,
+		localeId: String,
+		completion: @escaping (Result<[String: Any], AppleSpeechTranscriberError>) -> Void
+	) {
 		guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeId)) else {
 			completion(.failure(.localeUnsupported(localeId)))
 			return
@@ -161,18 +258,15 @@ public enum AppleSpeechTranscriber {
 			completion(.failure(.recognitionFailed("recognizer unavailable (locale \(localeId))")))
 			return
 		}
+		print("[kneecap-stt] buffer engine: locale=\(localeId) onDevice=\(recognizer.supportsOnDeviceRecognition)")
 
-		let request = SFSpeechURLRecognitionRequest(url: url)
-		request.shouldReportPartialResults = false
+		let request = SFSpeechAudioBufferRecognitionRequest()
+		request.shouldReportPartialResults = true
 		request.taskHint = .dictation
 		if #available(iOS 16.0, macOS 13.0, *) {
 			request.addsPunctuation = true
 		}
-		// Local-first, like everything else in this app: never silently
-		// upload the user's audio. If this device/locale cannot recognize
-		// on-device, fail with a clear reason instead of falling back to
-		// Apple's server.
-	print("[kneecap-stt] recognizer locale=\(localeId) available=\(recognizer.isAvailable) onDevice=\(recognizer.supportsOnDeviceRecognition)")
+		// Local-first: never silently upload the user's audio.
 		if recognizer.supportsOnDeviceRecognition {
 			request.requiresOnDeviceRecognition = true
 		} else {
@@ -183,34 +277,62 @@ public enum AppleSpeechTranscriber {
 			return
 		}
 
-	// LIFETIME (round 21.2, found chasing the founder's empty-result device
-		// bug): nothing retains a local SFSpeechRecognizer once this function
-		// returns — if it deallocates mid-task, recognition dies quietly and
-		// can surface as an empty "final" result. The Mac harness passed on
-		// timing luck. The capture below chains recognizer <- closure <- task
-		// explicitly; released on both completion paths.
+		var bestWords: [RecognizedWord] = []
+		var bestText = ""
+		var completed = false
 		var retainedRecognizer: SFSpeechRecognizer? = recognizer
-		recognizer.recognitionTask(with: request) { result, error in
-			if let error {
-				retainedRecognizer = nil
-				completion(.failure(.recognitionFailed(error.localizedDescription)))
-				return
-			}
-			guard let result, result.isFinal else { return }
+		let finish: (Result<[String: Any], AppleSpeechTranscriberError>) -> Void = { result in
+			guard !completed else { return }
+			completed = true
 			retainedRecognizer = nil
-			let words = result.bestTranscription.segments.map { segment in
-				RecognizedWord(
-					text: segment.substring,
-					startSeconds: segment.timestamp,
-					durationSeconds: segment.duration,
-					confidence: Double(segment.confidence)
-				)
+			_ = retainedRecognizer // silence unused-write warning; the var IS the retain
+			completion(result)
+		}
+
+		recognizer.recognitionTask(with: request) { result, error in
+			if let result {
+				let words = result.bestTranscription.segments.map { segment in
+					RecognizedWord(
+						text: segment.substring,
+						startSeconds: segment.timestamp,
+						durationSeconds: segment.duration,
+						confidence: Double(segment.confidence)
+					)
+				}
+				if words.count >= bestWords.count {
+					bestWords = words
+					bestText = result.bestTranscription.formattedString
+				}
+				if result.isFinal {
+					print("[kneecap-stt] buffer engine final: \(words.count) words (best seen \(bestWords.count))")
+					finish(.success(wireResult(words: bestWords, fullText: bestText)))
+				}
 			}
-			print("[kneecap-stt] recognized \(words.count) raw words from \(url.lastPathComponent)")
-			completion(.success(wireResult(
-				words: words,
-				fullText: result.bestTranscription.formattedString
-			)))
+			if let error {
+				// On-device tasks are known to error AFTER delivering good
+				// partials — salvage them instead of failing the generate.
+				if !bestWords.isEmpty {
+					print("[kneecap-stt] buffer engine errored (\(error.localizedDescription)) — salvaging \(bestWords.count) partial words")
+					finish(.success(wireResult(words: bestWords, fullText: bestText)))
+				} else {
+					finish(.failure(.recognitionFailed(error.localizedDescription)))
+				}
+			}
+		}
+
+		do {
+			let audioFile = try AVAudioFile(forReading: url)
+			let format = audioFile.processingFormat
+			print("[kneecap-stt] feeding \(audioFile.length) frames @ \(format.sampleRate)Hz")
+			while audioFile.framePosition < audioFile.length {
+				guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else { break }
+				try audioFile.read(into: buffer)
+				if buffer.frameLength == 0 { break }
+				request.append(buffer)
+			}
+			request.endAudio()
+		} catch {
+			finish(.failure(.audioNotReadable("PCM read failed: \(error.localizedDescription)")))
 		}
 	}
 
