@@ -48,9 +48,11 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		// publikclip's own `classic` ASS preset ported to caption params
 		// (~/publikclip pipeline/captions/ass.py): bold white words, thick
 		// black outline, GOLD active word, bottom, sentence case, karaoke.
+		// fontSize 24 → 18 in round 23 (founder: "captions should be sized
+		// a little smaller by default") — pinch-to-scale covers the rest.
 		params: {
 			fontFamily: "Arial",
-			fontSize: 24,
+			fontSize: 18,
 			fontWeight: "bold",
 			color: "#ffffff",
 			highlightColor: "#FFD700",

@@ -428,10 +428,16 @@ function resolveCaptionNode({
 
 	const style = resolveCaptionStyle({ element: node.params });
 	const visible = getVisibleCaptionWords({ element: node.params });
-	const activeElementWordIndex = getActiveCaptionWordIndex({
-		element: node.params,
-		sourceLocalTime,
-	});
+	// Round 23 (founder: "highlighting the word ... should be optional"):
+	// animationStyle "none" means NO active word — every word renders in the
+	// base color and the active-word background never draws.
+	const activeElementWordIndex =
+		style.animationStyle === "none"
+			? null
+			: getActiveCaptionWordIndex({
+					element: node.params,
+					sourceLocalTime,
+				});
 	const activeVisibleIndex =
 		activeElementWordIndex === null
 			? null

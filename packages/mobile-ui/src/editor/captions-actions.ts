@@ -42,12 +42,17 @@ import {
 	resolveNativeMediaRawPath,
 	ZERO_MEDIA_TIME,
 } from "@kneecap/editor-core";
-import type { VideoElement } from "@kneecap/editor-core/timeline";
+import type { CaptionElement, CreateCaptionElement, VideoElement } from "@kneecap/editor-core/timeline";
+import type { ParamValues } from "@kneecap/editor-core/params";
 import {
 	buildCaptionElementsFromTranscript,
 	type TranscriptSegmentInput,
 } from "@kneecap/editor-core/captions";
-import { insertGeneratedCaptions, ApplyCaptionStyleCommand } from "@kneecap/editor-core/commands";
+import {
+	insertGeneratedCaptions,
+	ApplyCaptionStyleCommand,
+	UpdateElementsCommand,
+} from "@kneecap/editor-core/commands";
 import { windowSegmentsToClip } from "./caption-window";
 import {
 	getNativeBridge,
@@ -144,10 +149,13 @@ export async function generateCaptionsForClip({
 		durationMicros: Math.round(mediaTimeToSeconds({ time: target.duration }) * 1_000_000),
 	});
 
-	const elements = buildCaptionElementsFromTranscript({
-		segments: windowed,
-		timelineStartTime: target.startTime,
-		stylePresetId,
+	const elements = inheritSharedCaptionParams({
+		editor,
+		elements: buildCaptionElementsFromTranscript({
+			segments: windowed,
+			timelineStartTime: target.startTime,
+			stylePresetId,
+		}),
 	});
 	const inserted = insertGeneratedCaptions({ editor, elements });
 	if (!inserted) {
@@ -208,10 +216,13 @@ export async function generateCaptionsFromSampleClip({
 		segments.push(segment);
 	}
 
-	const elements = buildCaptionElementsFromTranscript({
-		segments,
-		timelineStartTime: ZERO_MEDIA_TIME,
-		stylePresetId,
+	const elements = inheritSharedCaptionParams({
+		editor,
+		elements: buildCaptionElementsFromTranscript({
+			segments,
+			timelineStartTime: ZERO_MEDIA_TIME,
+			stylePresetId,
+		}),
 	});
 
 	return insertGeneratedCaptions({ editor, elements });
@@ -230,4 +241,88 @@ export function applyCaptionStyleToAll({
 	editor.command.execute({
 		command: new ApplyCaptionStyleCommand({ presetId, scope: { kind: "all" } }),
 	});
+}
+
+/** Every caption element in the active scene, with its track. Captions are
+ *  a synced FAMILY (round 23): position, size, and the highlight toggle
+ *  always apply to all of them together. */
+export function getAllCaptions({
+	editor,
+}: {
+	editor: EditorCore;
+}): Array<{ trackId: string; element: CaptionElement }> {
+	const tracks = editor.scenes.getActiveScene().tracks;
+	const out: Array<{ trackId: string; element: CaptionElement }> = [];
+	for (const track of tracks.overlay) {
+		if (track.type !== "caption") continue;
+		for (const element of track.elements) {
+			if (element.type === "caption") out.push({ trackId: track.id, element });
+		}
+	}
+	return out;
+}
+
+/** Whether the spoken-word highlight is on, read from the first caption
+ *  (they're kept in sync). `true` with no captions — the presets default
+ *  to karaoke. */
+export function getCaptionHighlightEnabled({ editor }: { editor: EditorCore }): boolean {
+	const first = getAllCaptions({ editor })[0];
+	if (!first) return true;
+	return first.element.params.animationStyle !== "none";
+}
+
+/** Round 23 (founder: "highlighting the word ... should be optional") —
+ *  one undoable patch flipping `animationStyle` on EVERY caption between
+ *  karaoke (gold active word) and none (plain words, no highlight). */
+export function setCaptionHighlightEnabled({
+	editor,
+	enabled,
+}: {
+	editor: EditorCore;
+	enabled: boolean;
+}): void {
+	const captions = getAllCaptions({ editor });
+	if (captions.length === 0) return;
+	editor.command.execute({
+		command: new UpdateElementsCommand({
+			updates: captions.map(({ trackId, element }) => ({
+				trackId,
+				elementId: element.id,
+				patch: { params: { ...element.params, animationStyle: enabled ? "karaoke" : "none" } },
+			})),
+		}),
+	});
+}
+
+/** The params every caption shares as a family (round 23): layout
+ *  transform + the highlight choice. Newly generated captions inherit
+ *  these from the captions already on the timeline, so a moved/resized/
+ *  un-highlighted caption setup survives "Generate again". */
+const SHARED_CAPTION_PARAM_KEYS = [
+	"transform.positionX",
+	"transform.positionY",
+	"transform.scaleX",
+	"transform.scaleY",
+	"animationStyle",
+] as const;
+
+function inheritSharedCaptionParams({
+	editor,
+	elements,
+}: {
+	editor: EditorCore;
+	elements: CreateCaptionElement[];
+}): CreateCaptionElement[] {
+	const first = getAllCaptions({ editor })[0];
+	if (!first) return elements;
+	const inherited: ParamValues = {};
+	for (const key of SHARED_CAPTION_PARAM_KEYS) {
+		const value = first.element.params[key];
+		if (value !== undefined) inherited[key] = value;
+	}
+	if (Object.keys(inherited).length === 0) return elements;
+	return elements.map((element) => ({
+		...element,
+		params: { ...element.params, ...inherited },
+	}));
 }

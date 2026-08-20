@@ -129,6 +129,20 @@ public enum AnyCodableValue: Codable, Equatable {
 		if case .number(let v) = self { return v }
 		return nil
 	}
+	public var asBool: Bool? {
+		if case .bool(let v) = self { return v }
+		return nil
+	}
+}
+
+/// One karaoke word of a caption clip — `EdlClip.captionWords` in
+/// `edl/types.ts`. Tick times are in the clip's SOURCE tick space (the same
+/// space as `sourceStartTicks`/`sourceEndTicks`), passed through unchanged
+/// from `CaptionWord.startTime`/`endTime`.
+public struct EdlCaptionWord: Codable, Equatable {
+	public var text: String
+	public var startTicks: Int64
+	public var endTicks: Int64
 }
 
 public struct EdlEffect: Codable, Equatable {
@@ -190,6 +204,9 @@ public struct EdlClip: Codable, Equatable {
 	public var effects: [EdlEffect]
 	public var masks: [EdlMask]
 	public var animations: [EdlAnimationChannel]
+	/// Only non-empty for `kind == "caption"`. Optional so pre-round-23 EDL
+	/// fixtures (encoded before the field was parsed here) still decode.
+	public var captionWords: [EdlCaptionWord]?
 	public var params: [String: AnyCodableValue]
 }
 

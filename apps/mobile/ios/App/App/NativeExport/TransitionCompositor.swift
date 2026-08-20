@@ -84,6 +84,47 @@ public struct OverlayVideoLayer {
 	}
 }
 
+/// One karaoke state of an `OverlayBillboard`: the image that shows from
+/// `startSeconds` (output/composition time) until the next state starts.
+public struct OverlayBillboardState {
+	public let startSeconds: Double
+	public let image: CIImage
+
+	public init(startSeconds: Double, image: CIImage) {
+		self.startSeconds = startSeconds
+		self.image = image
+	}
+}
+
+/// A pre-rasterized text/sticker/caption overlay, composited per frame by
+/// the custom compositor (round 23). This REPLACES the
+/// `AVVideoCompositionCoreAnimationTool` CALayer path: AVFoundation ignores
+/// the animation tool whenever `customVideoCompositorClass` is set (this
+/// pipeline always sets it), so the CALayer overlays never rendered in any
+/// export — proven empirically by a probe (white 80pt text over the black
+/// letterbox band exported to nothing; the old golden-frame cyan check was
+/// a false positive fed by the colorful fixture).
+public struct OverlayBillboard {
+	/// Sorted ascending by `startSeconds`; the LAST state whose start is
+	/// <= the frame time renders (sticky karaoke). One state = static.
+	public let states: [OverlayBillboardState]
+	/// Display rect in OUTPUT pixels, top-left origin, +Y down (the EDL's
+	/// screen convention) — flipped into Core Image space at composite time.
+	public let rect: CGRect
+	public let opacity: Double
+	/// Active window in OUTPUT (transition-remapped) composition time.
+	public let timeRange: CMTimeRange
+	public let zIndex: Int
+
+	public init(states: [OverlayBillboardState], rect: CGRect, opacity: Double, timeRange: CMTimeRange, zIndex: Int) {
+		self.states = states
+		self.rect = rect
+		self.opacity = opacity
+		self.timeRange = timeRange
+		self.zIndex = zIndex
+	}
+}
+
 /// The full CapCut "Adjust" slider set (round 22 — founder: "adjustment to
 /// video menu does not work in preview or in export"), values as authored
 /// in the EDL effect params (-100...100, sharpen/vignette 0...100). Applied
@@ -192,6 +233,10 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 	/// Picture-in-picture layers whose windows intersect this instruction's
 	/// time range, ascending zIndex (composited in order, last on top).
 	public let overlayVideoLayers: [OverlayVideoLayer]
+	/// Text/sticker/caption billboards intersecting this instruction's
+	/// range, ascending zIndex — composited ABOVE the PiP layers (text over
+	/// video overlays, same stacking the preview renders).
+	public let overlayBillboards: [OverlayBillboard]
 
 	init(
 		timeRange: CMTimeRange,
@@ -207,7 +252,8 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		primaryPlacement: SourcePlacement = .identity,
 		secondaryPlacement: SourcePlacement = .identity,
 		backgroundColor: CIColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1),
-		overlayVideoLayers: [OverlayVideoLayer] = []
+		overlayVideoLayers: [OverlayVideoLayer] = [],
+		overlayBillboards: [OverlayBillboard] = []
 	) {
 		self.timeRange = timeRange
 		self.primaryTrackID = primaryTrackID
@@ -223,6 +269,7 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		self.secondaryPlacement = secondaryPlacement
 		self.backgroundColor = backgroundColor
 		self.overlayVideoLayers = overlayVideoLayers
+		self.overlayBillboards = overlayBillboards
 		self.containsTweening = secondaryTrackID != kCMPersistentTrackID_Invalid
 		// `requiredSourceTrackIDs` is typed `[NSValue]?`, but AVFoundation's
 		// OWN validation (`-[AVVideoComposition
@@ -355,6 +402,34 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 					renderSize: renderSize
 				)
 				image = layerImage.composited(over: image)
+			}
+
+			// Text/sticker/caption billboards, above PiP. State selection is
+			// the sticky-karaoke rule: the last state whose start has passed.
+			for billboard in instruction.overlayBillboards {
+				guard billboard.timeRange.containsTime(compositionTime) else { continue }
+				let seconds = compositionTime.seconds
+				var stateImage = billboard.states.first?.image
+				for state in billboard.states where state.startSeconds <= seconds {
+					stateImage = state.image
+				}
+				guard let stateImage else { continue }
+				let extent = stateImage.extent
+				guard extent.width > 0, extent.height > 0 else { continue }
+				// rect is top-left/+Y-down (screen convention); CI is
+				// bottom-left/+Y-up — flip once here, same as `place`.
+				let scaleX = billboard.rect.width / extent.width
+				let scaleY = billboard.rect.height / extent.height
+				let ciOriginY = renderSize.height - billboard.rect.maxY
+				var placed = stateImage
+					.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+					.transformed(by: CGAffineTransform(translationX: billboard.rect.minX, y: ciOriginY))
+				if billboard.opacity < 1 {
+					placed = placed.applyingFilter("CIColorMatrix", parameters: [
+						"inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(billboard.opacity)),
+					])
+				}
+				image = placed.composited(over: image)
 			}
 
 			guard let outputBuffer = renderContext?.newPixelBuffer() else {

@@ -6,8 +6,14 @@ import { SegmentedControl } from "../segmented-control";
 import type { EditorCore } from "@kneecap/editor-core";
 import type { ElementRef } from "@kneecap/editor-core/timeline";
 import { CAPTION_STYLE_PRESETS, DEFAULT_CAPTION_STYLE_PRESET_ID } from "@kneecap/editor-core/captions";
-import { generateCaptions, applyCaptionStyleToAll } from "../../editor/captions-actions";
+import {
+	generateCaptions,
+	applyCaptionStyleToAll,
+	getCaptionHighlightEnabled,
+	setCaptionHighlightEnabled,
+} from "../../editor/captions-actions";
 import { setCaptionText } from "../../editor/actions";
+import { ToggleRow } from "../editor/param-row";
 import { captionText } from "../../editor/caption-text";
 import type { CaptionElement } from "@kneecap/editor-core/timeline";
 
@@ -61,6 +67,9 @@ export function CaptionsPanel({ editor, onClose, onInserted, selectedCaption }: 
 	// exactly what the user typed; the engine stores the tokenized words.
 	const [captionDraft, setCaptionDraft] = useState<{ id: string; text: string } | null>(null);
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
+	// Read live from the engine each render (the shell re-renders this panel
+	// on timeline changes, same as the caption textarea's words).
+	const highlightEnabled = getCaptionHighlightEnabled({ editor });
 
 	const handleGenerate = () => {
 		setState("generating");
@@ -138,6 +147,15 @@ export function CaptionsPanel({ editor, onClose, onInserted, selectedCaption }: 
 					setStylePreset(id);
 					applyCaptionStyleToAll({ editor, presetId: id });
 				}}
+			/>
+			{/* Round 23 (founder: "highlighting the word ... should be
+			    optional") — flips animationStyle on EVERY caption; captions
+			    are a synced family. Note preset chips above reset it (a
+			    preset bundles its own animationStyle). */}
+			<ToggleRow
+				label="Highlight spoken word"
+				active={highlightEnabled}
+				onToggle={() => setCaptionHighlightEnabled({ editor, enabled: !highlightEnabled })}
 			/>
 		</PanelSheet>
 	);

@@ -134,6 +134,22 @@ public enum VideoCompositionBuilder {
 			pipLayers.filter { $0.timeRange.intersection(range).duration.seconds > 0 }
 		}
 
+		// --- Text/sticker/caption billboards (round 23): pre-rasterized and
+		// composited per-frame by the custom compositor, exactly like PiP.
+		// The old AVVideoCompositionCoreAnimationTool path was DEAD CODE —
+		// AVFoundation ignores the animation tool when
+		// `customVideoCompositorClass` is set, so CALayer overlays never
+		// rendered in any export (see OverlayLayerBuilder's header). ---
+		let billboardRenderSize = CGSize(
+			width: edl.output.resolution.width,
+			height: edl.output.resolution.height
+		)
+		let billboards = OverlayLayerBuilder.buildBillboards(edl: edl, renderSize: billboardRenderSize)
+
+		func billboardsIntersecting(_ range: CMTimeRange) -> [OverlayBillboard] {
+			billboards.filter { $0.timeRange.intersection(range).duration.seconds > 0 }
+		}
+
 		// --- Build the sorted, contiguous instruction segments ---
 		struct Segment {
 			var startTicks: Int64
@@ -153,7 +169,8 @@ public enum VideoCompositionBuilder {
 				primaryAdjust: enabledAdjust(placement.clipId),
 				primaryPlacement: sourcePlacement(placement.clipId),
 				backgroundColor: backgroundColor,
-				overlayVideoLayers: pipLayersIntersecting(range)
+				overlayVideoLayers: pipLayersIntersecting(range),
+				overlayBillboards: billboardsIntersecting(range)
 			)
 			segments.append(Segment(startTicks: solo.start, endTicks: solo.end, instruction: instruction))
 		}
@@ -180,7 +197,8 @@ public enum VideoCompositionBuilder {
 				primaryPlacement: sourcePlacement(outgoingId),
 				secondaryPlacement: sourcePlacement(incomingId),
 				backgroundColor: backgroundColor,
-				overlayVideoLayers: pipLayersIntersecting(range)
+				overlayVideoLayers: pipLayersIntersecting(range),
+				overlayBillboards: billboardsIntersecting(range)
 			)
 			segments.append(Segment(startTicks: window.startTicks, endTicks: window.endTicks, instruction: instruction))
 		}
@@ -191,34 +209,11 @@ public enum VideoCompositionBuilder {
 		composition.customVideoCompositorClass = EdlTransitionCompositor.self
 		composition.instructions = segments.map(\.instruction)
 		composition.frameDuration = EdlTime.frameDuration(fps: edl.output.fps)
-		let renderSize = CGSize(width: edl.output.resolution.width, height: edl.output.resolution.height)
-		composition.renderSize = renderSize
-
-		let overlayLayers = OverlayLayerBuilder.buildOverlayLayers(edl: edl, renderSize: renderSize)
-		if !overlayLayers.isEmpty {
-			let videoLayer = CALayer()
-			videoLayer.frame = CGRect(origin: .zero, size: renderSize)
-			let parentLayer = CALayer()
-			parentLayer.frame = CGRect(origin: .zero, size: renderSize)
-			// EDL overlay `transform.positionX/Y` are authored in the SAME
-			// top-left-origin, +Y-downward convention as
-			// `services/renderer/scene-builder.ts` (a screen/canvas
-			// convention, not AVFoundation's default bottom-left Core
-			// Animation space) — `isGeometryFlipped = true` on the parent
-			// makes Core Animation composite with that same top-left
-			// convention so `OverlayLayerBuilder`'s frame math (also
-			// top-left-origin) lines up without a second, error-prone
-			// coordinate flip in two different files.
-			parentLayer.isGeometryFlipped = true
-			parentLayer.addSublayer(videoLayer)
-			for layer in overlayLayers {
-				parentLayer.addSublayer(layer)
-			}
-			composition.animationTool = AVVideoCompositionCoreAnimationTool(
-				postProcessingAsVideoLayer: videoLayer,
-				in: parentLayer
-			)
-		}
+		composition.renderSize = billboardRenderSize
+		// NOTE deliberately NO `composition.animationTool` here: it is
+		// ignored alongside `customVideoCompositorClass` (Apple-documented),
+		// which is exactly how the old overlay path silently never rendered.
+		// Overlays ride the instructions as `overlayBillboards` instead.
 
 		return composition
 	}

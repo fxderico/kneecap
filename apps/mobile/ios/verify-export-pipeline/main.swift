@@ -422,6 +422,103 @@ print("  chroma spread: baseline=\(String(format: "%.2f", baselineChroma)) adjus
 check(baselineChroma > 8.0, "baseline fixture band is genuinely colorful (got \(baselineChroma))")
 check(adjustedChroma < 3.0, "saturation -100 clip exports grayscale (got \(adjustedChroma))")
 
+// --- 12. Caption burn-in (round 23): caption clips render in native export,
+// karaoke-highlighted, and honor animationStyle "none" (highlight optional).
+// Before this round they were silently DROPPED (OverlayLayerBuilder only
+// handled text/sticker/graphic). ---
+print("== 12. Caption clips burn into the export (karaoke + highlight-off) ==")
+func captionClipDict(id: String, animationStyle: String) -> [String: Any] {
+	// Three short words in SOURCE tick space [0, 2.0): starts 0 / 0.6 / 1.2.
+	// Clip occupies output [0.5s, 2.5s) — word k activates at 0.5 + start.
+	[
+		"clipId": id, "kind": "caption", "assetId": NSNull(), "name": id,
+		"startTicks": t(0.5), "durationTicks": t(2.0),
+		"sourceStartTicks": 0, "sourceEndTicks": t(2.0), "trimEndTicks": 0,
+		"speed": ["numerator": 1, "denominator": 1],
+		"maintainPitch": false, "volumeDb": 0, "muted": false, "hidden": false,
+		"transform": ["positionX": 0, "positionY": 0, "scaleX": 1, "scaleY": 1, "rotateDegrees": 0],
+		"opacity": 1, "blendMode": "normal",
+		"effects": [] as [[String: Any]], "masks": [] as [[String: Any]], "animations": [] as [[String: Any]],
+		"captionWords": [
+			["text": "go", "startTicks": t(0.0), "endTicks": t(0.6)],
+			["text": "far", "startTicks": t(0.6), "endTicks": t(1.2)],
+			["text": "now", "startTicks": t(1.2), "endTicks": t(2.0)],
+		],
+		"params": [
+			"fontFamily": "Arial", "fontSize": 8, "fontWeight": "bold",
+			"color": "#ffffff", "highlightColor": "#FFD700",
+			"strokeColor": "#000000", "strokeWidth": 6,
+			"position": "bottom", "uppercase": false,
+			"animationStyle": animationStyle,
+		],
+	]
+}
+func captionEdl(animationStyle: String) throws -> EdlDocument {
+	var json = portraitEdlJson
+	var tracks = json["tracks"] as! [[String: Any]]
+	tracks.append([
+		"trackId": "track-captions",
+		"kind": "overlay",
+		"trackType": "caption",
+		"name": "Captions",
+		"zIndex": 3,
+		"muted": false,
+		"hidden": false,
+		"clips": [captionClipDict(id: "clip-caption", animationStyle: animationStyle)],
+	])
+	json["tracks"] = tracks
+	return try EdlDecoder.decode(jsObject: json)
+}
+// Bottom-position caption on the 540x960 portrait canvas: centerY = 0.86H,
+// scaledFontSize = 8 * 960/90 ≈ 85px, line height ≈ 111px -> the caption
+// band is y 0.79..0.93 — inside the letterbox band step 9 proved is
+// otherwise pure black.
+let captionBandY = 0.79..<0.93
+let karaokeURL = workDir.appendingPathComponent("captions-karaoke.mp4")
+_ = try await EdlExporter.export(
+	edl: try captionEdl(animationStyle: "karaoke"),
+	resolveAssetURL: { _ in fixtureURL },
+	outputURL: karaokeURL,
+	onProgress: { _ in }
+)
+let captionActive = try extractFrame(from: karaokeURL, at: 1.4)  // word "far" active
+let captionAfter = try extractFrame(from: karaokeURL, at: 2.9)   // caption window over
+// Visual-inspection artifact FIRST (so a failing check still leaves the
+// frame on disk) + a coarse y-band sweep to locate the caption if the
+// expected band is dark.
+let inspectURL = FileManager.default.temporaryDirectory.appendingPathComponent("kneecap-caption-frame.png")
+try writePNG(captionActive, to: inspectURL)
+print("  wrote caption frame for visual inspection: \(inspectURL.path)")
+for band in 0..<10 {
+	let y0 = Double(band) / 10.0
+	let b = meanBrightness(captionActive, xFraction: 0.1..<0.9, yFraction: y0..<(y0 + 0.1))
+	print("  y \(String(format: "%.1f", y0))-\(String(format: "%.1f", y0 + 0.1)): brightness \(String(format: "%.2f", b))")
+}
+let captionBandActive = meanBrightness(captionActive, xFraction: 0.1..<0.9, yFraction: captionBandY)
+let captionBandAfter = meanBrightness(captionAfter, xFraction: 0.1..<0.9, yFraction: captionBandY)
+// Gold measured INSIDE the caption band only — the colorful fixture
+// video contributes a ~0.05 whole-frame gold baseline that drowned the
+// caption signal (first run of this step failed exactly there).
+let goldActive = fractionOfPixelsNearColor(captionActive, target: (255, 215, 0), tolerance: 60, yFraction: 0.79..<0.93)
+print("  caption band: active=\(String(format: "%.2f", captionBandActive)) after=\(String(format: "%.2f", captionBandAfter)) goldFraction=\(String(format: "%.4f", goldActive))")
+check(captionBandActive > 8.0, "caption words render in the bottom band while the clip is active (got \(captionBandActive))")
+check(captionBandAfter < 6.0, "caption band returns to black after the clip ends (got \(captionBandAfter))")
+check(goldActive > 0.003, "karaoke gold highlight is present on the active word (got \(goldActive))")
+
+let noHighlightURL = workDir.appendingPathComponent("captions-plain.mp4")
+_ = try await EdlExporter.export(
+	edl: try captionEdl(animationStyle: "none"),
+	resolveAssetURL: { _ in fixtureURL },
+	outputURL: noHighlightURL,
+	onProgress: { _ in }
+)
+let plainActive = try extractFrame(from: noHighlightURL, at: 1.4)
+let plainBand = meanBrightness(plainActive, xFraction: 0.1..<0.9, yFraction: captionBandY)
+let goldPlain = fractionOfPixelsNearColor(plainActive, target: (255, 215, 0), tolerance: 60, yFraction: 0.79..<0.93)
+print("  highlight-off: band=\(String(format: "%.2f", plainBand)) goldFraction=\(String(format: "%.4f", goldPlain))")
+check(plainBand > 8.0, "animationStyle none still renders the words (got \(plainBand))")
+check(goldPlain < 0.0002, "animationStyle none has NO gold highlight (got \(goldPlain))")
+
 print("\nALL CHECKS PASSED")
 		exitCode = 0
 	} catch {
@@ -439,6 +536,27 @@ struct RGBAFrame {
 	var width: Int
 	var height: Int
 	var bytes: [UInt8] // RGBA8, row-major
+}
+
+func writePNG(_ frame: RGBAFrame, to url: URL) throws {
+	let ctx = CGContext(
+		data: nil, width: frame.width, height: frame.height,
+		bitsPerComponent: 8, bytesPerRow: 0,
+		space: CGColorSpaceCreateDeviceRGB(),
+		bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+	)!
+	frame.bytes.withUnsafeBytes { src in
+		let dst = ctx.data!
+		let rowBytes = ctx.bytesPerRow
+		for row in 0..<frame.height {
+			memcpy(dst + row * rowBytes, src.baseAddress! + row * frame.width * 4, frame.width * 4)
+		}
+	}
+	guard let image = ctx.makeImage(),
+		let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)
+	else { throw NSError(domain: "verify", code: 1, userInfo: [NSLocalizedDescriptionKey: "PNG write failed"]) }
+	CGImageDestinationAddImage(dest, image, nil)
+	CGImageDestinationFinalize(dest)
 }
 
 func extractFrame(from url: URL, at seconds: Double) throws -> RGBAFrame {
@@ -524,10 +642,17 @@ func meanChromaSpread(_ frame: RGBAFrame, xFraction: Range<Double>, yFraction: R
 	return count > 0 ? total / count : 0
 }
 
-func fractionOfPixelsNearColor(_ frame: RGBAFrame, target: (UInt8, UInt8, UInt8), tolerance: Int) -> Double {
+func fractionOfPixelsNearColor(
+	_ frame: RGBAFrame,
+	target: (UInt8, UInt8, UInt8),
+	tolerance: Int,
+	yFraction: Range<Double> = 0.0..<1.0
+) -> Double {
 	var matches = 0
 	var total = 0
-	for y in Swift.stride(from: 0, to: frame.height, by: 2) {
+	let yStart = Int(Double(frame.height) * yFraction.lowerBound)
+	let yEnd = Int(Double(frame.height) * yFraction.upperBound)
+	for y in Swift.stride(from: yStart, to: yEnd, by: 2) {
 		for x in Swift.stride(from: 0, to: frame.width, by: 2) {
 			let idx = (y * frame.width + x) * 4
 			let r = Int(frame.bytes[idx]), g = Int(frame.bytes[idx + 1]), b = Int(frame.bytes[idx + 2])
