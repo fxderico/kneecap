@@ -7,6 +7,8 @@ import type { SceneTracks, TimelineElement } from "@/timeline";
 import { generateUUID } from "@/utils/id";
 import { EditorCore } from "@/core";
 import { applyPlacement, resolveTrackPlacement } from "@/timeline/placement";
+import { pipSpawnParams } from "@/timeline/pip-spawn";
+import { isVisualElement } from "@/timeline/element-utils";
 import { cloneAnimations } from "@/animation";
 import type { MediaTime } from "@/wasm";
 
@@ -55,13 +57,28 @@ export class DuplicateElementsCommand extends Command {
 				}
 
 				const newId = generateUUID();
-				newTrackElements.push(
-					buildDuplicateElement({
-						element,
-						id: newId,
-						startTime: element.startTime,
-					}),
-				);
+				const duplicate = buildDuplicateElement({
+					element,
+					id: newId,
+					startTime: element.startTime,
+				});
+				// The copy lands on a NEW overlay track at the SAME time — with
+				// identical params it would render pixel-for-pixel on top of the
+				// original and look like nothing happened. Spawn it as visible
+				// picture-in-picture instead (see pip-spawn.ts).
+				if (isVisualElement(duplicate)) {
+					const canvasSize =
+						editor.project.getActive()?.settings.canvasSize;
+					if (canvasSize) {
+						duplicate.params = pipSpawnParams({
+							params: duplicate.params,
+							elementType: duplicate.type,
+							canvasWidth: canvasSize.width,
+							canvasHeight: canvasSize.height,
+						});
+					}
+				}
+				newTrackElements.push(duplicate);
 			}
 
 			const placementResult = resolveTrackPlacement({

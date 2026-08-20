@@ -336,6 +336,61 @@ Task {
 		check(midLeft > 10.0, "centered band has real content on the LEFT half (got \(midLeft))")
 		check(midRight > 10.0, "centered band has real content on the RIGHT half — the OLD bug left this black (got \(midRight))")
 
+		print("== 10. Picture-in-picture: an overlay VIDEO clip composites into the export (round 19) ==")
+		// Same portrait timeline as step 9, plus an overlay video track: the
+		// fixture again, sourced from a LATER time offset (distinct content),
+		// scaled to 0.35 and positioned up into the top letterbox band —
+		// which step 9 proved is otherwise pure black. Expected geometry:
+		// contain 0.5625 x 0.35 -> ~189x106 centered at (270, 180): rows
+		// ~127..233, cols ~175..364. Active window [0.5s, 2.5s) of output
+		// time (starts before the transition's incoming clip, so unshifted).
+		var pipEdlJson = portraitEdlJson
+		var pipTracks = pipEdlJson["tracks"] as! [[String: Any]]
+		pipTracks.append([
+			"trackId": "track-pip",
+			"kind": "overlay",
+			"trackType": "video",
+			"name": "PiP",
+			"zIndex": 2,
+			"muted": false,
+			"hidden": false,
+			"clips": [[
+				"clipId": "clip-pip", "kind": "video", "assetId": "asset-1", "name": "clip-pip",
+				"startTicks": t(0.5), "durationTicks": t(2.0),
+				"sourceStartTicks": t(1.0), "sourceEndTicks": t(3.0), "trimEndTicks": 0,
+				"speed": ["numerator": 1, "denominator": 1],
+				"maintainPitch": false, "volumeDb": 0, "muted": false, "hidden": false,
+				"transform": ["positionX": 0, "positionY": -300, "scaleX": 0.35, "scaleY": 0.35, "rotateDegrees": 0],
+				"opacity": 1, "blendMode": "normal",
+				"effects": [] as [[String: Any]], "masks": [] as [[String: Any]], "animations": [] as [[String: Any]],
+				"params": [:] as [String: Any],
+			]],
+		])
+		pipEdlJson["tracks"] = pipTracks
+
+		let pipEdl = try EdlDecoder.decode(jsObject: pipEdlJson)
+		let pipURL = workDir.appendingPathComponent("pip.mp4")
+		let pipResult = try await EdlExporter.export(
+			edl: pipEdl,
+			resolveAssetURL: { _ in fixtureURL },
+			outputURL: pipURL,
+			onProgress: { _ in }
+		)
+		check(pipResult.width == 540 && pipResult.height == 960, "PiP export dims == 540x960 (got \(pipResult.width)x\(pipResult.height))")
+
+		let pipActiveFrame = try extractFrame(from: pipURL, at: 1.0)   // overlay active
+		let pipInactiveFrame = try extractFrame(from: pipURL, at: 2.9) // overlay window over
+		let pipRegionActive = meanBrightness(pipActiveFrame, xFraction: 0.36..<0.64, yFraction: 0.15..<0.22)
+		let pipCornerActive = meanBrightness(pipActiveFrame, xFraction: 0.02..<0.20, yFraction: 0.02..<0.10)
+		let pipRegionInactive = meanBrightness(pipInactiveFrame, xFraction: 0.36..<0.64, yFraction: 0.15..<0.22)
+		print("  brightness: pipRegion(active)=\(String(format: "%.2f", pipRegionActive)) corner(active)=\(String(format: "%.2f", pipCornerActive)) pipRegion(after)=\(String(format: "%.2f", pipRegionInactive))")
+		check(pipRegionActive > 10.0, "PiP region shows real content while the overlay clip is active (got \(pipRegionActive))")
+		check(pipCornerActive < 6.0, "outside the PiP quad the letterbox band stays black — placement is bounded, not smeared (got \(pipCornerActive))")
+		check(pipRegionInactive < 6.0, "PiP region returns to black after the overlay clip ends (got \(pipRegionInactive))")
+		// And the main band underneath is still present and unharmed.
+		let pipMainBand = meanBrightness(pipActiveFrame, xFraction: 0.02..<0.98, yFraction: 0.40..<0.60)
+		check(pipMainBand > 10.0, "main-track band still renders beneath the PiP (got \(pipMainBand))")
+
 		print("\nALL CHECKS PASSED")
 		exitCode = 0
 	} catch {

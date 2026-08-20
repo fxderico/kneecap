@@ -52,6 +52,38 @@ public struct SourcePlacement {
 	)
 }
 
+/// One picture-in-picture layer composited ABOVE the main track (round 19:
+/// "export NEEDS to do it"). Video overlays pull decoded frames from their
+/// own composition lane (`.track`); image overlays are decoded once at
+/// build time and carried as a static CIImage (`.still`) — both go through
+/// the SAME `SourcePlacement` placement as the main track, so preview and
+/// export agree by construction.
+public struct OverlayVideoLayer {
+	public enum Source {
+		case track(CMPersistentTrackID)
+		case still(CIImage)
+	}
+	public let source: Source
+	public let placement: SourcePlacement
+	/// Active window in OUTPUT (transition-remapped) composition time.
+	public let timeRange: CMTimeRange
+	/// EDL track zIndex — layers composite in ascending order (higher = on
+	/// top), matching OverlayLayerBuilder's CALayer ordering.
+	public let zIndex: Int
+
+	public init(source: Source, placement: SourcePlacement, timeRange: CMTimeRange, zIndex: Int) {
+		self.source = source
+		self.placement = placement
+		self.timeRange = timeRange
+		self.zIndex = zIndex
+	}
+
+	var trackID: CMPersistentTrackID? {
+		if case .track(let id) = source { return id }
+		return nil
+	}
+}
+
 public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol {
 	public var timeRange: CMTimeRange
 	public var enablePostProcessing: Bool = false
@@ -94,6 +126,9 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 	/// Canvas background the sources composite over (EDL `meta.background`
 	/// when it is a flat color; opaque black otherwise/by default).
 	public let backgroundColor: CIColor
+	/// Picture-in-picture layers whose windows intersect this instruction's
+	/// time range, ascending zIndex (composited in order, last on top).
+	public let overlayVideoLayers: [OverlayVideoLayer]
 
 	init(
 		timeRange: CMTimeRange,
@@ -106,7 +141,8 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		secondaryBrightness: Double? = nil,
 		primaryPlacement: SourcePlacement = .identity,
 		secondaryPlacement: SourcePlacement = .identity,
-		backgroundColor: CIColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+		backgroundColor: CIColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1),
+		overlayVideoLayers: [OverlayVideoLayer] = []
 	) {
 		self.timeRange = timeRange
 		self.primaryTrackID = primaryTrackID
@@ -119,6 +155,7 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		self.primaryPlacement = primaryPlacement
 		self.secondaryPlacement = secondaryPlacement
 		self.backgroundColor = backgroundColor
+		self.overlayVideoLayers = overlayVideoLayers
 		self.containsTweening = secondaryTrackID != kCMPersistentTrackID_Invalid
 		// `requiredSourceTrackIDs` is typed `[NSValue]?`, but AVFoundation's
 		// OWN validation (`-[AVVideoComposition
@@ -131,7 +168,7 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		// construction is a bare `NSNumber`, upcast to `NSValue` for the
 		// array's declared element type via inheritance, not a second
 		// `NSValue` layer wrapping one.
-		self.requiredSourceTrackIDs = [primaryTrackID, secondaryTrackID]
+		self.requiredSourceTrackIDs = ([primaryTrackID, secondaryTrackID] + overlayVideoLayers.compactMap(\.trackID))
 			.filter { $0 != kCMPersistentTrackID_Invalid }
 			.map { NSNumber(value: $0) as NSValue }
 		super.init()
@@ -221,6 +258,30 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 					progress: progress,
 					kind: instruction.transitionKind ?? "cross_fade"
 				)
+			}
+
+			// Picture-in-picture layers, ascending zIndex (pre-sorted by
+			// VideoCompositionBuilder): each active layer's frame is placed
+			// with the SAME SourcePlacement math as the main track and
+			// composited on top. A lane with no media at this time yields a
+			// nil sourceFrame and is skipped — not an error.
+			let compositionTime = asyncVideoCompositionRequest.compositionTime
+			for layer in instruction.overlayVideoLayers {
+				guard layer.timeRange.containsTime(compositionTime) else { continue }
+				var layerImage: CIImage
+				switch layer.source {
+				case .track(let trackID):
+					guard let buffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: trackID) else { continue }
+					layerImage = CIImage(cvPixelBuffer: buffer)
+				case .still(let stillImage):
+					layerImage = stillImage
+				}
+				layerImage = Self.place(
+					image: layerImage,
+					placement: layer.placement,
+					renderSize: renderSize
+				)
+				image = layerImage.composited(over: image)
 			}
 
 			guard let outputBuffer = renderContext?.newPixelBuffer() else {

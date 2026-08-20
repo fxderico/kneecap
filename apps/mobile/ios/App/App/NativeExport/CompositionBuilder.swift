@@ -18,6 +18,11 @@ public struct BuiltComposition {
 	/// inserts on one track).
 	public var mainTrackIDs: [String: CMPersistentTrackID]
 	public var transitionWindows: [TransitionWindow]
+	/// Which composition video track each overlay (PiP) VIDEO clip's media
+	/// landed on — one lane per overlay track (clips within one overlay
+	/// track never overlap each other). Image overlay clips have no lane;
+	/// they become `.still` layers in `VideoCompositionBuilder`.
+	public var overlayVideoTrackIDs: [String: CMPersistentTrackID]
 	public var audioMix: AVMutableAudioMix?
 	/// The input EDL with every NON-main-track clip's `startTicks` (and
 	/// `meta.durationTicks`) remapped through
@@ -212,8 +217,61 @@ public enum CompositionBuilder {
 			bgmMixParams.append(params)
 		}
 
+		// Overlay (PiP) VIDEO clips — round 19: one composition video lane per
+		// overlay video track, frames composited by EdlTransitionCompositor
+		// with the same SourcePlacement math as the main track. Audio rides
+		// along unless the clip is muted. Timing goes through the SAME
+		// remapTick the other non-main tracks use, so PiP stays in sync with
+		// a transition-compressed main track.
+		var overlayVideoTrackIDs: [String: CMPersistentTrackID] = [:]
+		var overlayAudioParams: [AVMutableAudioMixInputParameters] = []
+		for track in edl.tracks where track.kind == "overlay" && track.trackType == "video" {
+			let videoClips = track.clips.filter { $0.kind == "video" && !$0.hidden }
+			guard !videoClips.isEmpty else { continue }
+			guard let lane = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
+			var audioLane: AVMutableCompositionTrack?
+			var audioParams: AVMutableAudioMixInputParameters?
+
+			for clip in videoClips {
+				guard let assetId = clip.assetId else { continue }
+				let avAsset = try loadAsset(assetId)
+				let assetTracks = try await avAsset.load(.tracks)
+				guard let videoTrack = assetTracks.first(where: { $0.mediaType == .video }) else { continue }
+
+				let sourceDurationTicks = max(0, clip.sourceEndTicks - clip.sourceStartTicks)
+				let sourceRange = EdlTime.cmTimeRange(
+					startTicks: clip.sourceStartTicks,
+					durationTicks: sourceDurationTicks,
+					ticksPerSecond: tps
+				)
+				let insertAt = EdlTime.cmTime(ticks: remapTick(clip.startTicks), ticksPerSecond: tps)
+				let targetDuration = EdlTime.cmTime(ticks: clip.durationTicks, ticksPerSecond: tps)
+
+				try lane.insertTimeRange(sourceRange, of: videoTrack, at: insertAt)
+				if sourceRange.duration != targetDuration, sourceRange.duration.seconds > 0 {
+					lane.scaleTimeRange(CMTimeRange(start: insertAt, duration: sourceRange.duration), toDuration: targetDuration)
+				}
+				overlayVideoTrackIDs[clip.clipId] = lane.trackID
+
+				if !clip.muted, let audioTrack = assetTracks.first(where: { $0.mediaType == .audio }) {
+					if audioLane == nil {
+						audioLane = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+						if let audioLane { audioParams = AVMutableAudioMixInputParameters(track: audioLane) }
+					}
+					if let audioLane, let audioParams {
+						try audioLane.insertTimeRange(sourceRange, of: audioTrack, at: insertAt)
+						if sourceRange.duration != targetDuration, sourceRange.duration.seconds > 0 {
+							audioLane.scaleTimeRange(CMTimeRange(start: insertAt, duration: sourceRange.duration), toDuration: targetDuration)
+						}
+						audioParams.setVolume(Float(dbToLinear(clip.volumeDb)), at: insertAt)
+					}
+				}
+			}
+			if let audioParams { overlayAudioParams.append(audioParams) }
+		}
+
 		let audioMix = AVMutableAudioMix()
-		audioMix.inputParameters = audioRampInstructions + bgmMixParams
+		audioMix.inputParameters = audioRampInstructions + bgmMixParams + overlayAudioParams
 
 		let totalDurationTicks = placements.last?.insertEndTicks ?? 0
 
@@ -255,6 +313,7 @@ public enum CompositionBuilder {
 			mainPlacements: placements,
 			mainTrackIDs: mainTrackIDs,
 			transitionWindows: windows,
+			overlayVideoTrackIDs: overlayVideoTrackIDs,
 			audioMix: audioMix,
 			remappedEdl: remappedEdl
 		)

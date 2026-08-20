@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreGraphics
 import CoreImage
+import ImageIO
 
 /// kneecap M9 — assembles the `AVMutableVideoComposition` from a
 /// `BuiltComposition` (plan M9 items 1-3): renders every main-track segment
@@ -20,7 +21,11 @@ public enum VideoCompositionBuilder {
 	/// and `MainTrackPlacement.buildNominalToOutputRemap`. The main track
 	/// itself is untouched by remapping (only non-main tracks are), so
 	/// reading `effects`/`clipById` off it here is safe either way.
-	public static func build(edl: EdlDocument, built: BuiltComposition) throws -> AVMutableVideoComposition {
+	public static func build(
+		edl: EdlDocument,
+		built: BuiltComposition,
+		resolveAssetURL: ((EdlAsset) -> URL?)? = nil
+	) throws -> AVMutableVideoComposition {
 		guard built.totalDurationTicks > 0, !built.mainPlacements.isEmpty else {
 			throw VideoCompositionBuilderError.emptyTimeline
 		}
@@ -65,6 +70,54 @@ public enum VideoCompositionBuilder {
 			return parsed
 		}()
 
+		// --- Overlay (PiP) layers: video via their composition lanes, images
+		// as build-time-decoded stills; both placed by the compositor with
+		// the main track's own SourcePlacement math. Ascending zIndex ==
+		// composite order (higher on top), matching OverlayLayerBuilder. ---
+		var pipLayers: [OverlayVideoLayer] = []
+		for track in edl.tracks where track.kind == "overlay" && track.trackType == "video" {
+			for clip in track.clips where !clip.hidden {
+				guard let assetId = clip.assetId else { continue }
+				let rotation = assetById[assetId]?.rotationDegrees ?? 0
+				let placement = SourcePlacement(
+					transform: clip.transform,
+					rotationDegrees: rotation,
+					opacity: clip.opacity
+				)
+				let range = EdlTime.cmTimeRange(
+					startTicks: clip.startTicks,
+					durationTicks: clip.durationTicks,
+					ticksPerSecond: tps
+				)
+				let source: OverlayVideoLayer.Source
+				if clip.kind == "video" {
+					guard let trackID = built.overlayVideoTrackIDs[clip.clipId] else { continue }
+					source = .track(trackID)
+				} else if clip.kind == "image" {
+					guard let edlAsset = assetById[assetId],
+						  let url = resolveAssetURL?(edlAsset),
+						  let still = Self.loadStillImage(url: url) else {
+						print("[kneecap-export] image overlay clip \(clip.clipId): asset unreadable, skipped")
+						continue
+					}
+					source = .still(still)
+				} else {
+					continue
+				}
+				pipLayers.append(OverlayVideoLayer(
+					source: source,
+					placement: placement,
+					timeRange: range,
+					zIndex: track.zIndex ?? 0
+				))
+			}
+		}
+		pipLayers.sort { $0.zIndex < $1.zIndex }
+
+		func pipLayersIntersecting(_ range: CMTimeRange) -> [OverlayVideoLayer] {
+			pipLayers.filter { $0.timeRange.intersection(range).duration.seconds > 0 }
+		}
+
 		// --- Build the sorted, contiguous instruction segments ---
 		struct Segment {
 			var startTicks: Int64
@@ -82,7 +135,8 @@ public enum VideoCompositionBuilder {
 				primaryTrackID: trackID,
 				primaryBrightness: enabledBrightness(placement.clipId),
 				primaryPlacement: sourcePlacement(placement.clipId),
-				backgroundColor: backgroundColor
+				backgroundColor: backgroundColor,
+				overlayVideoLayers: pipLayersIntersecting(range)
 			)
 			segments.append(Segment(startTicks: solo.start, endTicks: solo.end, instruction: instruction))
 		}
@@ -106,7 +160,8 @@ public enum VideoCompositionBuilder {
 				secondaryBrightness: enabledBrightness(incomingId),
 				primaryPlacement: sourcePlacement(outgoingId),
 				secondaryPlacement: sourcePlacement(incomingId),
-				backgroundColor: backgroundColor
+				backgroundColor: backgroundColor,
+				overlayVideoLayers: pipLayersIntersecting(range)
 			)
 			segments.append(Segment(startTicks: window.startTicks, endTicks: window.endTicks, instruction: instruction))
 		}
@@ -147,6 +202,20 @@ public enum VideoCompositionBuilder {
 		}
 
 		return composition
+	}
+
+	/// Decode an image asset once, at build time, for a `.still` PiP layer.
+	/// Downsampled to at most 2160px on the long side — plenty for any v1
+	/// render size, and it bounds memory for a huge camera photo.
+	static func loadStillImage(url: URL) -> CIImage? {
+		guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+		let options: [CFString: Any] = [
+			kCGImageSourceCreateThumbnailFromImageAlways: true,
+			kCGImageSourceCreateThumbnailWithTransform: true, // bakes EXIF orientation
+			kCGImageSourceThumbnailMaxPixelSize: 2160,
+		]
+		guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+		return CIImage(cgImage: cgImage)
 	}
 
 	/// Parses `#RGB` / `#RRGGBB` (the EDL's flat-color background format)

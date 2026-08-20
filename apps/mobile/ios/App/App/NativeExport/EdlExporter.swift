@@ -73,7 +73,7 @@ public final class EdlExportHandle: @unchecked Sendable {
 public enum EdlExporter {
 	public static func export(
 		edl: EdlDocument,
-		resolveAssetURL: (EdlAsset) -> URL?,
+		resolveAssetURL: @escaping (EdlAsset) -> URL?,
 		outputURL: URL,
 		handle: EdlExportHandle = EdlExportHandle(),
 		onProgress: (@Sendable (Double) -> Void)? = nil
@@ -86,7 +86,7 @@ public enum EdlExporter {
 		// `built.remappedEdl`, NOT `edl` — see `VideoCompositionBuilder
 		// .build`'s doc comment on why overlay timing must read the
 		// transition-compressed document.
-		let videoComposition = try VideoCompositionBuilder.build(edl: built.remappedEdl, built: built)
+		let videoComposition = try VideoCompositionBuilder.build(edl: built.remappedEdl, built: built, resolveAssetURL: resolveAssetURL)
 		let composition = built.composition
 
 		if FileManager.default.fileExists(atPath: outputURL.path) {
