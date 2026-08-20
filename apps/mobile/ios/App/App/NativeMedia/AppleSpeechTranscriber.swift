@@ -102,8 +102,10 @@ public enum AppleSpeechTranscriber {
 					.appendingPathComponent("kneecap-stt-\(UUID().uuidString).m4a")
 				session.outputURL = outURL
 				session.outputFileType = .m4a
-				session.exportAsynchronously {
+			session.exportAsynchronously {
 					if session.status == .completed {
+						let bytes = (try? FileManager.default.attributesOfItem(atPath: outURL.path)[.size] as? Int) ?? 0
+						print("[kneecap-stt] extracted \(outURL.lastPathComponent): \(bytes ?? 0) bytes from \(url.lastPathComponent)")
 						completion(.success(outURL))
 					} else {
 						let reason = session.error?.localizedDescription ?? "status \(session.status.rawValue)"
@@ -170,6 +172,7 @@ public enum AppleSpeechTranscriber {
 		// upload the user's audio. If this device/locale cannot recognize
 		// on-device, fail with a clear reason instead of falling back to
 		// Apple's server.
+	print("[kneecap-stt] recognizer locale=\(localeId) available=\(recognizer.isAvailable) onDevice=\(recognizer.supportsOnDeviceRecognition)")
 		if recognizer.supportsOnDeviceRecognition {
 			request.requiresOnDeviceRecognition = true
 		} else {
@@ -180,12 +183,21 @@ public enum AppleSpeechTranscriber {
 			return
 		}
 
+	// LIFETIME (round 21.2, found chasing the founder's empty-result device
+		// bug): nothing retains a local SFSpeechRecognizer once this function
+		// returns — if it deallocates mid-task, recognition dies quietly and
+		// can surface as an empty "final" result. The Mac harness passed on
+		// timing luck. The capture below chains recognizer <- closure <- task
+		// explicitly; released on both completion paths.
+		var retainedRecognizer: SFSpeechRecognizer? = recognizer
 		recognizer.recognitionTask(with: request) { result, error in
 			if let error {
+				retainedRecognizer = nil
 				completion(.failure(.recognitionFailed(error.localizedDescription)))
 				return
 			}
 			guard let result, result.isFinal else { return }
+			retainedRecognizer = nil
 			let words = result.bestTranscription.segments.map { segment in
 				RecognizedWord(
 					text: segment.substring,
