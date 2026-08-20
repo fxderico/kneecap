@@ -6,7 +6,7 @@ import { SegmentedControl } from "../segmented-control";
 import type { EditorCore } from "@kneecap/editor-core";
 import type { ElementRef } from "@kneecap/editor-core/timeline";
 import { CAPTION_STYLE_PRESETS, DEFAULT_CAPTION_STYLE_PRESET_ID } from "@kneecap/editor-core/captions";
-import { generateCaptionsFromSampleClip, applyCaptionStyleToAll } from "../../editor/captions-actions";
+import { generateCaptions, applyCaptionStyleToAll } from "../../editor/captions-actions";
 
 interface CaptionsPanelProps {
 	editor: EditorCore;
@@ -54,7 +54,7 @@ export function CaptionsPanel({ editor, onClose, onInserted }: CaptionsPanelProp
 	const handleGenerate = () => {
 		setState("generating");
 		setErrorMessage(null);
-		generateCaptionsFromSampleClip({ editor, stylePresetId: stylePreset })
+		generateCaptions({ editor, stylePresetId: stylePreset })
 			.then((result) => {
 				setState("done");
 				if (result && result.elementIds[0]) {
@@ -70,9 +70,8 @@ export function CaptionsPanel({ editor, onClose, onInserted }: CaptionsPanelProp
 	return (
 		<PanelSheet onScrimClick={onClose} header={<SheetHeader onClose={onClose} />}>
 			<p className="cc-panel-note">
-				Generate transcribes the bundled dev-fixture sample clip on-device (zero network, zero
-				cloud) — a real user-picked clip cannot be transcribed yet; that needs the native
-				whisper.cpp shell (plan M10).
+				Generate transcribes your clip&apos;s audio on this device (zero network, zero cloud)
+				— the selected clip, or the first clip on the main track. Trims are respected.
 			</p>
 			<div className="cc-param-row">
 				<div className="cc-param-row__head">

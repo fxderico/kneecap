@@ -84,6 +84,9 @@ public class NativeBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         // events on).
         CAPPluginMethod(name: "exportProject", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "exportCancel", returnType: CAPPluginReturnPromise),
+        // M10 round 20: on-device captions via Apple Speech — see
+        // NativeBridgePlugin+Transcribe.swift / NativeMedia/AppleSpeechTranscriber.swift.
+        CAPPluginMethod(name: "transcribe", returnType: CAPPluginReturnPromise),
     ]
 
     /// Retains the `PHPickerViewControllerDelegate` for the duration of an

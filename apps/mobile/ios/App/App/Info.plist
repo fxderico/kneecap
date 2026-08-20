@@ -28,6 +28,8 @@
 	<string>kneecap saves exported videos back to your library when you tap Export.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>kneecap uses the camera to record clips directly into your project.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>kneecap transcribes your clips' audio on this device to generate captions. Audio never leaves your phone.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>kneecap uses the microphone to record voiceovers and camera audio.</string>
 	<key>CFBundleURLTypes</key>

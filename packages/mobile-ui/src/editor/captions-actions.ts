@@ -36,18 +36,146 @@
  * the caller's own flags). That gap is real and left open, not papered
  * over: the panel's copy says exactly this.
  */
-import type { EditorCore } from "@kneecap/editor-core";
-import { ZERO_MEDIA_TIME } from "@kneecap/editor-core";
+import type { EditorCore, MediaAsset } from "@kneecap/editor-core";
+import {
+	mediaTimeToSeconds,
+	resolveNativeMediaRawPath,
+	ZERO_MEDIA_TIME,
+} from "@kneecap/editor-core";
+import type { VideoElement } from "@kneecap/editor-core/timeline";
 import {
 	buildCaptionElementsFromTranscript,
 	type TranscriptSegmentInput,
 } from "@kneecap/editor-core/captions";
 import { insertGeneratedCaptions, ApplyCaptionStyleCommand } from "@kneecap/editor-core/commands";
-import { getNativeBridge, DEV_FIXTURE_MEDIA_HANDLE } from "@kneecap/native-bridge";
+import { windowSegmentsToClip } from "./caption-window";
+import {
+	getNativeBridge,
+	DEV_FIXTURE_MEDIA_HANDLE,
+	type MediaHandle,
+	type TranscriptSegment,
+} from "@kneecap/native-bridge";
 
 export interface GenerateCaptionsResult {
 	trackId: string;
 	elementIds: string[];
+}
+
+/**
+ * Round 20 — REAL captions: transcribe an actual clip's audio on-device
+ * (iOS: Apple Speech via NativeBridgePlugin+Transcribe.swift; Android:
+ * whisper.cpp) and land the words as caption elements aligned under the
+ * clip. Target = the selected video clip, else the first main-track video
+ * clip. The transcript is source-relative; words are windowed to the
+ * clip's [trimStart, trimStart+duration) and shifted clip-relative, so
+ * captions land where the AUDIBLE audio is, trims respected.
+ *
+ * Throws with actionable messages ("no video clip", "no native media
+ * file") — the caller (the panel, or generateCaptions below) decides how
+ * to degrade.
+ */
+export async function generateCaptionsForClip({
+	editor,
+	stylePresetId,
+}: {
+	editor: EditorCore;
+	stylePresetId: string;
+}): Promise<GenerateCaptionsResult | null> {
+	const tracks = editor.scenes.getActiveScene().tracks;
+	const selectedRef = editor.selection.getSelectedElements()[0];
+	const selectedElement = selectedRef
+		? [tracks.main, ...tracks.overlay]
+				.find((track) => track.id === selectedRef.trackId)
+				?.elements.find((el) => el.id === selectedRef.elementId)
+		: undefined;
+	const target =
+		selectedElement?.type === "video"
+			? selectedElement
+			: tracks.main.elements.find(
+					(el): el is VideoElement => el.type === "video" && !el.hidden,
+				);
+	if (!target || target.type !== "video") {
+		throw new Error("Add a video clip first — captions transcribe the clip's audio.");
+	}
+
+	const asset: MediaAsset | undefined = editor.media
+		.getAssets()
+		.find((a) => a.id === target.mediaId);
+	// Original preferred (full-quality audio), proxy accepted — the same
+	// custody preference the native exporter's asset resolver uses.
+	const rawPath = asset?.sourceNativeRelativePath
+		? resolveNativeMediaRawPath(asset.sourceNativeRelativePath)
+		: asset?.nativeRelativePath
+			? resolveNativeMediaRawPath(asset.nativeRelativePath)
+			: null;
+	if (!asset || !rawPath) {
+		throw new Error(
+			"This clip has no on-device media file to transcribe (web dev harness clips can't be transcribed — native builds only).",
+		);
+	}
+
+	const handle: MediaHandle = {
+		id: asset.id,
+		uri: rawPath,
+		kind: "video",
+		fileName: asset.name,
+		sizeBytes: 0,
+		durationMicros: Math.round((asset.duration ?? 0) * 1_000_000),
+		width: asset.width ?? 0,
+		height: asset.height ?? 0,
+		rotationDegrees: 0,
+		hasAudio: true,
+		codec: "",
+		frameRate: null,
+	};
+
+	const bridge = await getNativeBridge();
+	const segments: TranscriptSegment[] = [];
+	for await (const segment of bridge.transcribe({
+		handle,
+		opts: { modelSize: "tiny" },
+	})) {
+		segments.push(segment);
+	}
+
+	const windowed = windowSegmentsToClip({
+		segments,
+		trimStartMicros: Math.round(mediaTimeToSeconds({ time: target.trimStart }) * 1_000_000),
+		durationMicros: Math.round(mediaTimeToSeconds({ time: target.duration }) * 1_000_000),
+	});
+
+	const elements = buildCaptionElementsFromTranscript({
+		segments: windowed,
+		timelineStartTime: target.startTime,
+		stylePresetId,
+	});
+	return insertGeneratedCaptions({ editor, elements });
+}
+
+/**
+ * The panel's one entry point: try the real clip first; when the failure
+ * is the KNOWN "nothing transcribable here" class (no clip / no native
+ * file — i.e. the web dev harness), fall back to the bundled sample so
+ * the dev flow keeps demonstrating the pipeline. Real native errors
+ * (permission denied, unsupported locale, IO) propagate untouched.
+ */
+export async function generateCaptions({
+	editor,
+	stylePresetId,
+}: {
+	editor: EditorCore;
+	stylePresetId: string;
+}): Promise<GenerateCaptionsResult | null> {
+	try {
+		return await generateCaptionsForClip({ editor, stylePresetId });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const noTranscribableClip =
+			message.includes("Add a video clip first") ||
+			message.includes("no on-device media file");
+		if (!noTranscribableClip) throw error;
+		return generateCaptionsFromSampleClip({ editor, stylePresetId });
+	}
 }
 
 /** Runs the real generate pipeline against the dev-fixture sample clip and

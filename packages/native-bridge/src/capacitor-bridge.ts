@@ -661,15 +661,25 @@ export function createCapacitorBridge({
 					modelSize: opts.modelSize,
 					languageHint: opts.languageHint,
 				});
-			} catch {
-				// See this file's header comment: neither native half is wired
-				// end-to-end yet. Falls through to the same NOT_IMPLEMENTED
-				// contract every other stub in this file uses.
-				return notImplemented({
-					method: "transcribe",
-					milestone:
-						"M10 (native half — apps/mobile/{ios,android} whisper.cpp integration not yet wired into the build; see this file's header comment)",
-				});
+			} catch (err) {
+				// Round 20: iOS ships a REAL native transcribe method (Apple
+				// Speech — NativeBridgePlugin+Transcribe.swift), so real
+				// failures (PERMISSION_DENIED, UNSUPPORTED locale, IO_ERROR)
+				// must propagate as themselves. Only Capacitor's own
+				// "method not implemented" rejection — an OLD native build
+				// without the method — keeps the milestone message.
+				if (
+					typeof err === "object" &&
+					err !== null &&
+					(err as { code?: unknown }).code === "UNIMPLEMENTED"
+				) {
+					return notImplemented({
+						method: "transcribe",
+						milestone:
+							"M10 (this native build predates the transcribe method — rebuild the app)",
+					});
+				}
+				throw toNativeBridgeError({ err, method: "transcribe" });
 			}
 			for (const segment of mapNativeTranscribeResult(raw)) {
 				yield segment;
