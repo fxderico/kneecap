@@ -90,6 +90,15 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	/** Helper chips left of the main track's first clip (Mute clip audio /
 	 *  AI clipper / Cover in CapCut). */
 	leadingChips?: React.ReactNode;
+	/** ENGINE-BACKED selection (round 18): when provided (the live shell),
+	 *  the strip highlight follows it — a clip grabbed directly on the
+	 *  preview highlights here too. Local tap state remains the fallback
+	 *  for the dev harness. */
+	selectedClipId?: string | null;
+	/** Fired when the strip background is tapped (deselect). The live shell
+	 *  clears the engine selection here; the harness's local state clears
+	 *  either way. */
+	onClearSelection?: () => void;
 	/** ENGINE-BACKED transitions (round 17): when provided, the squares and
 	 *  the sheet read from here and every edit goes through
 	 *  `onTransitionCommit` (the shell turns it into an undoable
@@ -118,6 +127,8 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		onQuickAddAudio,
 		onQuickAddText,
 		leadingChips,
+		selectedClipId: selectedClipIdProp,
+		onClearSelection,
 		transitions: transitionsProp,
 		onTransitionCommit,
 	},
@@ -126,7 +137,9 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	const { ref: scrollRef, width: viewportWidthPx } = useElementSize<HTMLDivElement>();
 	const [zoom, setZoom] = useState(1);
 	const [currentTimeSec, setCurrentTimeSec] = useState(0);
-	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+	const [localSelectedClipId, setSelectedClipId] = useState<string | null>(null);
+	const selectedClipId =
+		selectedClipIdProp !== undefined ? selectedClipIdProp : localSelectedClipId;
 	const [trimPreview, setTrimPreview] = useState<TrimPreview | null>(null);
 	const [snapIndicatorSec, setSnapIndicatorSec] = useState<number | null>(null);
 	const [localTransitions, setLocalTransitions] = useState<Record<string, Transition>>({});
@@ -355,7 +368,10 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 						paddingRight: edgePaddingPx,
 						minHeight: totalContentHeightPx,
 					}}
-					onPointerDown={() => setSelectedClipId(null)}
+					onPointerDown={() => {
+						setSelectedClipId(null);
+						onClearSelection?.();
+					}}
 				>
 					<TimelineRuler durationSec={project.durationSec} pixelsPerSecond={pixelsPerSecond} />
 					{leadingChips && (

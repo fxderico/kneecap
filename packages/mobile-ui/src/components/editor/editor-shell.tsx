@@ -252,6 +252,8 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						onSelectClip={({ clipId, trackId }) =>
 							selectElement({ editor, ref: { trackId, elementId: clipId } })
 						}
+						selectedClipId={selectedRef?.elementId ?? null}
+						onClearSelection={() => selectElement({ editor, ref: null })}
 						transitions={transitionsVM}
 						onTransitionCommit={({ afterClipId, kind, durationSec, applyToAll }) =>
 							setMainTrackTransition({

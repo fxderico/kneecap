@@ -16,11 +16,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
-import { TICKS_PER_SECOND } from "@kneecap/editor-core";
+import { TICKS_PER_SECOND, type MediaTime } from "@kneecap/editor-core";
 import { useEditor } from "@kneecap/editor-core/react";
 import { isVisualElement } from "@kneecap/editor-core/timeline";
 import type { ParamValues } from "@kneecap/editor-core/params";
 import { useSelectedElement } from "../../editor/use-live-editor";
+import { selectElement } from "../../editor/actions";
+import { hitTestPreview } from "../../editor/preview-hit-test";
 import { CanvasRenderer } from "@kneecap/editor-core/services/renderer/canvas-renderer";
 import { buildScene } from "@kneecap/editor-core/services/renderer/scene-builder";
 import type { RootNode } from "@kneecap/editor-core/services/renderer/nodes/root-node";
@@ -167,6 +169,7 @@ function PreviewRendererInner() {
 	const gestureHandlers = usePreviewTransformGesture({
 		mountRef,
 		canvasWidth: width,
+		canvasHeight: height,
 	});
 
 	return (
@@ -180,28 +183,37 @@ function PreviewRendererInner() {
 }
 
 /**
- * CapCut-style direct manipulation on the preview (round 17, founder ask
- * "when I highlight a clip I should be able to move it around in the
- * frame"): with a visual element selected, one finger drags it
- * (`transform.positionX/Y`, canvas units) and a second finger pinches to
- * scale (`transform.scaleX/Y`, sign-preserving). Mid-gesture frames go
- * through the engine's preview overlay (`timeline.previewElements`) — the
- * same live-without-committing path the web transform handles use — and
- * the release commits ONE undoable TracksSnapshotCommand
- * (`timeline.commitPreview`).
+ * CapCut-style DIRECT manipulation on the preview (round 18, founder:
+ * "it should just be able to be moved from on top of the preview area" —
+ * round 17's selection-gated version read as "completely inaccessible").
  *
- * Tap-to-toggle-playback (PreviewStage's onPointerUp) keeps working: the
- * gesture only claims the pointer once movement crosses a slop threshold,
- * and only a real drag stops the up-event from bubbling to the stage.
+ * Touching a clip in the preview grabs it: pointerdown hit-tests the
+ * topmost visual element under the finger at the playhead
+ * (preview-hit-test.ts — overlay[0] wins over main, the selected element
+ * wins over anything stacked on it), selects it, and starts the drag in
+ * the same motion. One finger moves (`transform.positionX/Y`, canvas
+ * units), a second finger pinches to scale (`transform.scaleX/Y`,
+ * sign-preserving); with something selected, a two-finger pinch works
+ * ANYWHERE on the preview. Text/caption elements have no cheap bounds, so
+ * they keep the selection-based fallback: select one (timeline/panel) and
+ * any preview drag moves it.
+ *
+ * Mid-gesture frames ride the engine's preview overlay
+ * (`timeline.previewElements`); release commits ONE undoable
+ * TracksSnapshotCommand (`timeline.commitPreview`). Tap semantics: tap on
+ * a clip = select it (swallowed); tap on empty preview = PreviewStage's
+ * play/pause toggle, untouched.
  */
 const DRAG_SLOP_PX = 6;
 
 function usePreviewTransformGesture({
 	mountRef,
 	canvasWidth,
+	canvasHeight,
 }: {
 	mountRef: RefObject<HTMLDivElement | null>;
 	canvasWidth: number;
+	canvasHeight: number;
 }) {
 	const editor = useEditor();
 	const [selectedRef, selectedElement] = useSelectedElement();
@@ -220,13 +232,16 @@ function usePreviewTransformGesture({
 		anchorScaleX: number;
 		anchorScaleY: number;
 		dragging: boolean;
+		/** True when the session started by touching the element itself —
+		 *  a dragless release then reads as a SELECT tap (swallowed), not a
+		 *  play/pause tap. Fallback sessions (text/caption, pinch-anywhere)
+		 *  leave taps alone. */
+		viaHit: boolean;
 		target: { trackId: string; elementId: string };
 	} | null>(null);
-
-	const canManipulate =
-		selectedRef !== null &&
-		selectedElement !== null &&
-		isVisualElement(selectedElement);
+	/** Fingers that landed on empty preview (no session) — kept so a second
+	 *  finger can still open the pinch-anywhere session for the selection. */
+	const passiveRef = useRef<Map<number, { x: number; y: number }>>(new Map());
 
 	const readNumber = (params: ParamValues, key: string, fallback: number) => {
 		const value = params[key];
@@ -308,52 +323,128 @@ function usePreviewTransformGesture({
 
 	const endSession = (commit: boolean) => {
 		const session = sessionRef.current;
-		if (!session) return false;
-		const dragged = session.dragging;
+		if (!session) return null;
 		sessionRef.current = null;
-		if (dragged && commit) {
+		if (session.dragging && commit) {
 			editor.timeline.commitPreview();
-		} else if (dragged) {
+		} else if (session.dragging) {
 			editor.timeline.discardPreview();
 		}
-		return dragged;
+		return session;
 	};
 
-	if (!canManipulate) {
-		// No selection: keep the surface inert so taps reach the stage's
-		// play/pause handler untouched. Any half-open session is discarded.
-		if (sessionRef.current) endSession(false);
-		return {};
-	}
+	const openSession = ({
+		pointers,
+		params,
+		viaHit,
+		target,
+	}: {
+		pointers: Map<number, { x: number; y: number }>;
+		params: ParamValues;
+		viaHit: boolean;
+		target: { trackId: string; elementId: string };
+	}) => {
+		const { centroid, distance } = centroidAndDistance(pointers);
+		sessionRef.current = {
+			pointers,
+			startCentroid: centroid,
+			startDistance: distance,
+			initialParams: params,
+			anchorPositionX: readNumber(params, "transform.positionX", 0),
+			anchorPositionY: readNumber(params, "transform.positionY", 0),
+			anchorScaleX: readNumber(params, "transform.scaleX", 1),
+			anchorScaleY: readNumber(params, "transform.scaleY", 1),
+			dragging: false,
+			viaHit,
+			target,
+		};
+	};
+
+	const selectionIsManipulable =
+		selectedRef !== null &&
+		selectedElement !== null &&
+		isVisualElement(selectedElement);
 
 	return {
 		onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
+			const point = { x: event.clientX, y: event.clientY };
 			const existing = sessionRef.current;
 			if (existing) {
-				existing.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+				existing.pointers.set(event.pointerId, point);
 				reanchor(existing);
 				return;
 			}
-			if (!selectedRef || !selectedElement) return;
-			sessionRef.current = {
-				pointers: new Map([
-					[event.pointerId, { x: event.clientX, y: event.clientY }],
-				]),
-				startCentroid: { x: event.clientX, y: event.clientY },
-				startDistance: null,
-				initialParams: selectedElement.params,
-				anchorPositionX: readNumber(selectedElement.params, "transform.positionX", 0),
-				anchorPositionY: readNumber(selectedElement.params, "transform.positionY", 0),
-				anchorScaleX: readNumber(selectedElement.params, "transform.scaleX", 1),
-				anchorScaleY: readNumber(selectedElement.params, "transform.scaleY", 1),
-				dragging: false,
-				target: {
-					trackId: selectedRef.trackId,
-					elementId: selectedRef.elementId,
-				},
-			};
+
+			// Direct grab: whichever clip is under the finger, topmost first.
+			const rect = mountRef.current?.getBoundingClientRect();
+			if (rect && rect.width > 0 && rect.height > 0) {
+				const timeTicks = Math.min(
+					editor.playback.getCurrentTime(),
+					editor.timeline.getLastFrameTime(),
+				) as MediaTime;
+				const hit = hitTestPreview({
+					editor,
+					x: (point.x - rect.left) * (canvasWidth / rect.width),
+					y: (point.y - rect.top) * (canvasHeight / rect.height),
+					timeTicks,
+					canvasWidth,
+					canvasHeight,
+				});
+				if (hit && isVisualElement(hit.element)) {
+					if (
+						selectedRef?.elementId !== hit.ref.elementId ||
+						selectedRef?.trackId !== hit.ref.trackId
+					) {
+						selectElement({ editor, ref: hit.ref });
+					}
+					openSession({
+						pointers: new Map([[event.pointerId, point]]),
+						params: hit.element.params,
+						viaHit: true,
+						target: hit.ref,
+					});
+					return;
+				}
+			}
+
+			// Unhittable selection (text/caption): any preview drag moves it —
+			// the round-17 behavior, kept as the fallback for measured-layout
+			// elements.
+			if (
+				selectionIsManipulable &&
+				selectedRef &&
+				selectedElement &&
+				(selectedElement.type === "text" || selectedElement.type === "caption")
+			) {
+				openSession({
+					pointers: new Map([[event.pointerId, point]]),
+					params: selectedElement.params,
+					viaHit: false,
+					target: selectedRef,
+				});
+				return;
+			}
+
+			// Empty-area touch: passive. A second passive finger with a
+			// selection becomes the pinch-anywhere session for it.
+			passiveRef.current.set(event.pointerId, point);
+			if (passiveRef.current.size >= 2 && selectionIsManipulable && selectedRef && selectedElement) {
+				const pointers = new Map(passiveRef.current);
+				passiveRef.current.clear();
+				openSession({
+					pointers,
+					params: selectedElement.params,
+					viaHit: false,
+					target: selectedRef,
+				});
+			}
 		},
 		onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
+			const passive = passiveRef.current;
+			if (passive.has(event.pointerId)) {
+				passive.set(event.pointerId, { x: event.clientX, y: event.clientY });
+				return;
+			}
 			const session = sessionRef.current;
 			if (!session || !session.pointers.has(event.pointerId)) return;
 			session.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -370,6 +461,7 @@ function usePreviewTransformGesture({
 			applySessionUpdate();
 		},
 		onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => {
+			if (passiveRef.current.delete(event.pointerId)) return;
 			const session = sessionRef.current;
 			if (!session || !session.pointers.has(event.pointerId)) return;
 			session.pointers.delete(event.pointerId);
@@ -377,14 +469,15 @@ function usePreviewTransformGesture({
 				reanchor(session);
 				return;
 			}
-			const dragged = endSession(true);
-			if (dragged) {
-				// A real drag must not double as a tap: swallow it before
-				// PreviewStage's onPointerUp toggles playback.
+			const ended = endSession(true);
+			// Swallow the up-event for real drags AND for select-taps on a
+			// clip — neither should double as the stage's play/pause tap.
+			if (ended && (ended.dragging || ended.viaHit)) {
 				event.stopPropagation();
 			}
 		},
-		onPointerCancel: () => {
+		onPointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => {
+			passiveRef.current.delete(event.pointerId);
 			endSession(false);
 		},
 	};
