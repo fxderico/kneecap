@@ -28,6 +28,12 @@ export interface ReorderState {
 	draggedClipId: string;
 	insertionIndex: number;
 	dragXPx: number;
+	/** Content-space x of the tile strip's first slot — anchored to the
+	 *  VIEWPORT's left edge at mode start, not to time 0: when the user is
+	 *  scrolled deep into the timeline, tiles laid out from time 0 sit far
+	 *  off-screen left (founder, 2026-08-22: "the other clips don't get
+	 *  small enough so I can drag between them" — they were invisible). */
+	baseXPx: number;
 }
 
 export const REORDER_TILE_PX = 44;
@@ -118,7 +124,11 @@ export function TimelineTrackRow({
 				{others.map((clip, index) => {
 					const slot = index >= reorder.insertionIndex ? index + 1 : index;
 					return (
-						<ReorderTile key={clip.id} clip={clip} leftPx={slot * REORDER_STEP_PX} />
+						<ReorderTile
+							key={clip.id}
+							clip={clip}
+							leftPx={reorder.baseXPx + slot * REORDER_STEP_PX}
+						/>
 					);
 				})}
 				{dragged && (

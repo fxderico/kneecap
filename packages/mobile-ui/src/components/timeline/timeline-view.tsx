@@ -186,6 +186,9 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		clipId: string;
 		pointerId: number;
 		dragXPx: number;
+		/** Tile-strip anchor — see ReorderState.baseXPx. Frozen at mode
+		 *  start (the strip can't scroll during the drag; we own the touch). */
+		baseXPx: number;
 	} | null>(null);
 	const reorderSessionRef = useRef<typeof reorderSession>(null);
 	const [snapIndicatorSec, setSnapIndicatorSec] = useState<number | null>(null);
@@ -498,13 +501,13 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	projectRef.current = project;
 
 	const reorderInsertionIndex = useCallback(
-		(session: { trackId: string; dragXPx: number }): number => {
+		(session: { trackId: string; dragXPx: number; baseXPx: number }): number => {
 			const track = projectRef.current.tracks.find((t) => t.id === session.trackId);
 			const count = track?.clips.length ?? 0;
 			if (count === 0) return 0;
 			return Math.min(
 				count - 1,
-				Math.max(0, Math.round(session.dragXPx / REORDER_STEP_PX)),
+				Math.max(0, Math.round((session.dragXPx - session.baseXPx) / REORDER_STEP_PX)),
 			);
 		},
 		[],
@@ -526,14 +529,19 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 			setMovePreview(null);
 			movePreviewRef.current = null;
 			setSnapIndicatorSec(null);
+			// Anchor the tile strip to the viewport's left edge (content-space):
+			// tiles must appear where the user is LOOKING, not at time 0.
+			const node = scrollRef.current;
+			const baseXPx = node ? node.scrollLeft - edgePaddingPx + 16 : 0;
 			setReorderSession({
 				trackId: params.trackId,
 				clipId: params.clipId,
 				pointerId: params.pointerId,
 				dragXPx: contentXFromClient(params.clientX),
+				baseXPx,
 			});
 		},
-		[onReorderMainTrack, project.tracks, contentXFromClient],
+		[onReorderMainTrack, project.tracks, contentXFromClient, scrollRef, edgePaddingPx],
 	);
 
 	// The reordering row swaps to tile rendering, unmounting the clip
@@ -719,6 +727,7 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 											draggedClipId: reorderSession.clipId,
 											insertionIndex: reorderInsertionIndex(reorderSession),
 											dragXPx: reorderSession.dragXPx,
+											baseXPx: reorderSession.baseXPx,
 										} satisfies ReorderState)
 									: null
 							}

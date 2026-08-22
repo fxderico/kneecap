@@ -361,7 +361,7 @@ export function commitElementMove({
 	}
 
 	// Main track: order by midpoint with the dragged clip at its candidate
-	// position, then re-butt sequentially from 0 (see rebuttUpdates). The
+	// position, then re-butt sequentially from 0 (see commitRebuttedMain). The
 	// dragged clip's key is nudged half a tick toward its drag direction so
 	// an exact midpoint tie (equal-duration clips with the candidate clamped
 	// at 0) resolves in the direction the user pulled instead of silently
@@ -378,33 +378,50 @@ export function commitElementMove({
 				: b.startTime + b.duration / 2;
 		return aMid - bMid;
 	});
-	const updates = rebuttUpdates({ trackId, ordered });
-	if (updates.length === 0) return;
-	editor.command.execute({ command: new UpdateElementsCommand({ updates }) });
+	commitRebuttedMain({ editor, orderedIds: ordered.map((el) => el.id) });
 }
 
-/** startTime patches that lay `ordered` out butted from 0 — the magnetic
- *  main-track re-layout shared by move, reorder, and (inline) delete. */
-function rebuttUpdates({
-	trackId,
-	ordered,
+/**
+ * Re-lays the main track out in `orderedIds` order, butted from 0, in ONE
+ * undoable TracksSnapshotCommand — and, critically, REWRITES THE ELEMENT
+ * ARRAY in that order. Everything downstream assumes `main.elements` is
+ * time-sorted (transition squares pair array-adjacent clips, trim bounds
+ * read index neighbors, clip virtualization windows by index) — a commit
+ * that only patched startTimes left the array stale, which is exactly why
+ * the transition square vanished after a reorder (founder, 2026-08-22:
+ * it rendered at the OLD array-neighbor boundary, off the end of the
+ * timeline). Bails on a stale order (id missing/extra — e.g. an edit
+ * landed mid-drag) rather than guessing.
+ */
+function commitRebuttedMain({
+	editor,
+	orderedIds,
 }: {
-	trackId: string;
-	ordered: TimelineElement[];
-}): Array<{ trackId: string; elementId: string; patch: Partial<TimelineElement> }> {
-	const updates: Array<{
-		trackId: string;
-		elementId: string;
-		patch: Partial<TimelineElement>;
-	}> = [];
+	editor: EditorCore;
+	orderedIds: readonly string[];
+}): void {
+	const before = editor.scenes.getActiveScene().tracks;
+	if (orderedIds.length !== before.main.elements.length) return;
+	const byId = new Map(before.main.elements.map((el) => [el.id, el]));
 	let cursor = ZERO_MEDIA_TIME;
-	for (const el of ordered) {
-		if (el.startTime !== cursor) {
-			updates.push({ trackId, elementId: el.id, patch: { startTime: cursor } });
-		}
+	let changed = false;
+	const rebutted: typeof before.main.elements = [];
+	for (const [index, id] of orderedIds.entries()) {
+		const el = byId.get(id);
+		if (!el) return;
+		if (before.main.elements[index]?.id !== id) changed = true;
+		const next = el.startTime === cursor ? el : { ...el, startTime: cursor };
+		if (next !== el) changed = true;
 		cursor = addMediaTime({ a: cursor, b: el.duration });
+		rebutted.push(next);
 	}
-	return updates;
+	if (!changed) return;
+	editor.command.execute({
+		command: new TracksSnapshotCommand({
+			before,
+			after: { ...before, main: { ...before.main, elements: rebutted } },
+		}),
+	});
 }
 
 /**
@@ -425,17 +442,7 @@ export function commitMainTrackReorder({
 }): void {
 	const tracks = editor.scenes.getActiveScene().tracks;
 	if (tracks.main.id !== trackId) return;
-	const byId = new Map(tracks.main.elements.map((el) => [el.id, el]));
-	if (orderedElementIds.length !== tracks.main.elements.length) return;
-	const ordered: TimelineElement[] = [];
-	for (const id of orderedElementIds) {
-		const el = byId.get(id);
-		if (!el) return;
-		ordered.push(el);
-	}
-	const updates = rebuttUpdates({ trackId, ordered });
-	if (updates.length === 0) return;
-	editor.command.execute({ command: new UpdateElementsCommand({ updates }) });
+	commitRebuttedMain({ editor, orderedIds: orderedElementIds });
 }
 
 /** Round 21.4 — caption text edited as a plain string (see
