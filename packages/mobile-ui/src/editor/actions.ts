@@ -11,7 +11,6 @@ import type { EditorCore, MediaAsset, MediaType, TCanvasSize } from "@kneecap/ed
 import type { CaptionWord, ElementRef, RetimeConfig, TimelineElement } from "@kneecap/editor-core/timeline";
 import type { ParamValues } from "@kneecap/editor-core/params";
 import {
-	DeleteElementsCommand,
 	DuplicateElementsCommand,
 	SplitElementsCommand,
 	UpdateElementsCommand,
@@ -22,6 +21,7 @@ import {
 	ToggleClipEffectCommand,
 	UpdateProjectSettingsCommand,
 	TransitionsSnapshotCommand,
+	TracksSnapshotCommand,
 } from "@kneecap/editor-core/commands";
 import {
 	buildTextElement,
@@ -123,8 +123,37 @@ export function splitAtPlayhead({ editor, ref }: { editor: EditorCore; ref: Elem
 	});
 }
 
+/**
+ * MAGNETIC delete (founder, 2026-08-22: "split a clip twice and cut the
+ * middle clip — the 2 clips don't snap together"): the main track never
+ * keeps a hole. One TracksSnapshotCommand does the removal AND re-butts
+ * the main track, so undo restores both in a single step. Overlay/audio
+ * tracks are free-position — plain removal, no ripple. The generic
+ * DeleteElementsCommand stays gap-preserving for the desktop timeline.
+ */
 export function deleteSelected({ editor, refs }: { editor: EditorCore; refs: ElementRef[] }): void {
-	editor.command.execute({ command: new DeleteElementsCommand({ elements: refs }) });
+	const before = editor.scenes.getActiveScene().tracks;
+	const strip = <T extends { id: string; elements: TimelineElement[] }>(track: T): T => ({
+		...track,
+		elements: track.elements.filter(
+			(el) => !refs.some((r) => r.trackId === track.id && r.elementId === el.id),
+		),
+	});
+	const strippedMain = strip(before.main);
+	let cursor = ZERO_MEDIA_TIME;
+	const rebuttedElements = [...strippedMain.elements]
+		.sort((a, b) => a.startTime - b.startTime)
+		.map((el) => {
+			const next = el.startTime === cursor ? el : { ...el, startTime: cursor };
+			cursor = addMediaTime({ a: cursor, b: el.duration });
+			return next;
+		});
+	const after = {
+		main: { ...strippedMain, elements: rebuttedElements },
+		overlay: before.overlay.map(strip),
+		audio: before.audio.map(strip),
+	};
+	editor.command.execute({ command: new TracksSnapshotCommand({ before, after }) });
 	editor.selection.setSelectedElements({ elements: [] });
 }
 
@@ -332,10 +361,11 @@ export function commitElementMove({
 	}
 
 	// Main track: order by midpoint with the dragged clip at its candidate
-	// position, then re-butt sequentially from 0. The dragged clip's key is
-	// nudged half a tick toward its drag direction so an exact midpoint tie
-	// (equal-duration clips with the candidate clamped at 0) resolves in the
-	// direction the user pulled instead of silently keeping the old order.
+	// position, then re-butt sequentially from 0 (see rebuttUpdates). The
+	// dragged clip's key is nudged half a tick toward its drag direction so
+	// an exact midpoint tie (equal-duration clips with the candidate clamped
+	// at 0) resolves in the direction the user pulled instead of silently
+	// keeping the old order.
 	const dragBias = candidate < element.startTime ? -0.5 : 0.5;
 	const ordered = [...track.elements].sort((a, b) => {
 		const aMid =
@@ -348,6 +378,20 @@ export function commitElementMove({
 				: b.startTime + b.duration / 2;
 		return aMid - bMid;
 	});
+	const updates = rebuttUpdates({ trackId, ordered });
+	if (updates.length === 0) return;
+	editor.command.execute({ command: new UpdateElementsCommand({ updates }) });
+}
+
+/** startTime patches that lay `ordered` out butted from 0 — the magnetic
+ *  main-track re-layout shared by move, reorder, and (inline) delete. */
+function rebuttUpdates({
+	trackId,
+	ordered,
+}: {
+	trackId: string;
+	ordered: TimelineElement[];
+}): Array<{ trackId: string; elementId: string; patch: Partial<TimelineElement> }> {
 	const updates: Array<{
 		trackId: string;
 		elementId: string;
@@ -360,6 +404,36 @@ export function commitElementMove({
 		}
 		cursor = addMediaTime({ a: cursor, b: el.duration });
 	}
+	return updates;
+}
+
+/**
+ * Hold-to-reorder commit (CapCut's long-press mode: clips collapse to
+ * uniform tiles, the held one lifts, drop decides its slot). The view
+ * hands over the final tile order; this re-butts the main track to it in
+ * ONE undoable command. Bails on a stale order (an id missing or extra —
+ * e.g. an edit landed mid-drag) rather than guessing.
+ */
+export function commitMainTrackReorder({
+	editor,
+	trackId,
+	orderedElementIds,
+}: {
+	editor: EditorCore;
+	trackId: string;
+	orderedElementIds: string[];
+}): void {
+	const tracks = editor.scenes.getActiveScene().tracks;
+	if (tracks.main.id !== trackId) return;
+	const byId = new Map(tracks.main.elements.map((el) => [el.id, el]));
+	if (orderedElementIds.length !== tracks.main.elements.length) return;
+	const ordered: TimelineElement[] = [];
+	for (const id of orderedElementIds) {
+		const el = byId.get(id);
+		if (!el) return;
+		ordered.push(el);
+	}
+	const updates = rebuttUpdates({ trackId, ordered });
 	if (updates.length === 0) return;
 	editor.command.execute({ command: new UpdateElementsCommand({ updates }) });
 }

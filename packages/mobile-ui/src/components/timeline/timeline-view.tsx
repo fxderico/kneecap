@@ -23,7 +23,9 @@ import { TimelineRuler } from "./timeline-ruler";
 import { TimelinePlayhead } from "./timeline-playhead";
 import {
 	TimelineTrackRow,
+	REORDER_STEP_PX,
 	type MovePreview,
+	type ReorderState,
 	type TrimPreview,
 } from "./timeline-track-row";
 import { TransitionSheet } from "./transition-sheet";
@@ -134,6 +136,14 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		trackId: string;
 		startSec: number;
 	}) => void;
+	/** CapCut hold-to-reorder commit: long-press lifts a MAIN-track clip,
+	 *  every clip collapses to a uniform tile, the drop slot decides the
+	 *  new order. Fired once per finished reorder drag with the full tile
+	 *  order; the shell re-butts the track to it in one undoable command. */
+	onReorderMainTrack?: (params: {
+		trackId: string;
+		orderedClipIds: string[];
+	}) => void;
 }>(function TimelineView(
 	{
 		project,
@@ -155,6 +165,7 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		onTransitionCommit,
 		onTrimClip,
 		onMoveClip,
+		onReorderMainTrack,
 	},
 	ref,
 ) {
@@ -168,6 +179,15 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	const [movePreview, setMovePreview] = useState<MovePreview | null>(null);
 	const movePreviewRef = useRef<MovePreview | null>(null);
 	const moveWasSnappedRef = useRef(false);
+	/** Hold-to-reorder session. dragXPx is content-space (same origin as
+	 *  clip lefts: 0 = time 0, i.e. past the leading gutter). */
+	const [reorderSession, setReorderSession] = useState<{
+		trackId: string;
+		clipId: string;
+		pointerId: number;
+		dragXPx: number;
+	} | null>(null);
+	const reorderSessionRef = useRef<typeof reorderSession>(null);
 	const [snapIndicatorSec, setSnapIndicatorSec] = useState<number | null>(null);
 	const [localTransitions, setLocalTransitions] = useState<Record<string, Transition>>({});
 	// Engine-backed when the shell provides them; local view-model otherwise
@@ -447,6 +467,127 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		[onMoveClip],
 	);
 
+	/** Manual strip pan (clip bodies have touch-action:none — see
+	 *  timeline-clip.tsx onPanBy): move the scroll node opposite the finger
+	 *  delta; the resulting native scroll event runs the normal
+	 *  scroll→time seek path. */
+	const handlePanBy = useCallback(
+		({ deltaPx }: { deltaPx: number }) => {
+			const node = scrollRef.current;
+			if (!node) return;
+			node.scrollLeft -= deltaPx;
+		},
+		[scrollRef],
+	);
+
+	/** clientX → content-space px (0 = time 0, past the leading gutter). */
+	const contentXFromClient = useCallback(
+		(clientX: number): number => {
+			const node = scrollRef.current;
+			if (!node) return 0;
+			const rect = node.getBoundingClientRect();
+			return node.scrollLeft + (clientX - rect.left) - edgePaddingPx;
+		},
+		[scrollRef, edgePaddingPx],
+	);
+
+	// Kept in sync for the window-listener effect below (the listeners
+	// outlive any single render's closure).
+	reorderSessionRef.current = reorderSession;
+	const projectRef = useRef(project);
+	projectRef.current = project;
+
+	const reorderInsertionIndex = useCallback(
+		(session: { trackId: string; dragXPx: number }): number => {
+			const track = projectRef.current.tracks.find((t) => t.id === session.trackId);
+			const count = track?.clips.length ?? 0;
+			if (count === 0) return 0;
+			return Math.min(
+				count - 1,
+				Math.max(0, Math.round(session.dragXPx / REORDER_STEP_PX)),
+			);
+		},
+		[],
+	);
+
+	const handleLongPress = useCallback(
+		(params: {
+			clipId: string;
+			trackId: string;
+			pointerId: number;
+			clientX: number;
+		}) => {
+			if (!onReorderMainTrack) return;
+			const track = project.tracks.find((t) => t.id === params.trackId);
+			if (!track || track.kind !== "main" || track.clips.length < 2) return;
+			hapticTick();
+			// The hold supersedes any in-flight trim/move preview state.
+			setTrimPreview(null);
+			setMovePreview(null);
+			movePreviewRef.current = null;
+			setSnapIndicatorSec(null);
+			setReorderSession({
+				trackId: params.trackId,
+				clipId: params.clipId,
+				pointerId: params.pointerId,
+				dragXPx: contentXFromClient(params.clientX),
+			});
+		},
+		[onReorderMainTrack, project.tracks, contentXFromClient],
+	);
+
+	// The reordering row swaps to tile rendering, unmounting the clip
+	// element the hold started on — so the drag lives on WINDOW listeners
+	// for the mode's whole lifetime (element capture would die with the
+	// unmount). pointerup commits, pointercancel abandons.
+	useEffect(() => {
+		if (!reorderSession) return;
+		const onMove = (event: PointerEvent) => {
+			const session = reorderSessionRef.current;
+			if (!session || event.pointerId !== session.pointerId) return;
+			const dragXPx = contentXFromClient(event.clientX);
+			setReorderSession((prev) => (prev ? { ...prev, dragXPx } : prev));
+		};
+		const finish = (commit: boolean) => {
+			const session = reorderSessionRef.current;
+			setReorderSession(null);
+			if (!commit || !session) return;
+			const track = projectRef.current.tracks.find((t) => t.id === session.trackId);
+			if (!track) return;
+			const ordered = [...track.clips].sort((a, b) => a.startSec - b.startSec);
+			const others = ordered
+				.filter((c) => c.id !== session.clipId)
+				.map((c) => c.id);
+			const index = reorderInsertionIndex(session);
+			others.splice(index, 0, session.clipId);
+			hapticTick();
+			onReorderMainTrack?.({ trackId: session.trackId, orderedClipIds: others });
+		};
+		const onUp = (event: PointerEvent) => {
+			const session = reorderSessionRef.current;
+			if (!session || event.pointerId !== session.pointerId) return;
+			finish(true);
+		};
+		const onCancel = (event: PointerEvent) => {
+			const session = reorderSessionRef.current;
+			if (!session || event.pointerId !== session.pointerId) return;
+			finish(false);
+		};
+		window.addEventListener("pointermove", onMove);
+		window.addEventListener("pointerup", onUp);
+		window.addEventListener("pointercancel", onCancel);
+		return () => {
+			window.removeEventListener("pointermove", onMove);
+			window.removeEventListener("pointerup", onUp);
+			window.removeEventListener("pointercancel", onCancel);
+		};
+	}, [
+		reorderSession !== null,
+		contentXFromClient,
+		reorderInsertionIndex,
+		onReorderMainTrack,
+	]);
+
 	const mainTrack = project.tracks.find((t) => t.kind === "main");
 	const mainTrackEndPx = mainTrack
 		? timeToPixels({
@@ -470,7 +611,10 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		24 /* ruler, --cc-ruler-height */ + project.tracks.length * 48; /* --cc-track-height */
 
 	return (
-		<div className="cc-timeline" style={{ height: "100%" }}>
+		<div
+			className={`cc-timeline${reorderSession ? " cc-timeline--reordering" : ""}`}
+			style={{ height: "100%" }}
+		>
 			<div
 				ref={scrollRef}
 				className="cc-timeline__scroll"
@@ -565,6 +709,19 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 							movePreview={movePreview}
 							onMovePreview={onMoveClip ? handleMovePreview : undefined}
 							onMoveEnd={onMoveClip ? handleMoveEnd : undefined}
+							onLongPress={
+								onReorderMainTrack && track.kind === "main" ? handleLongPress : undefined
+							}
+							onPanBy={handlePanBy}
+							reorder={
+								reorderSession && reorderSession.trackId === track.id
+									? ({
+											draggedClipId: reorderSession.clipId,
+											insertionIndex: reorderInsertionIndex(reorderSession),
+											dragXPx: reorderSession.dragXPx,
+										} satisfies ReorderState)
+									: null
+							}
 							snapTargets={snapTargets}
 							snapThresholdSec={snapThresholdSec}
 							transitionAfterClipIds={

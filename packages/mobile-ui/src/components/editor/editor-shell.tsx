@@ -48,6 +48,7 @@ import {
 	setProjectBackground,
 	commitElementTrim,
 	commitElementMove,
+	commitMainTrackReorder,
 } from "../../editor/actions";
 import { Scissors, Trash2, CopyPlus, SlidersHorizontal, Type, VolumeX, WandSparkles, ImagePlus } from "lucide-react";
 import { CC_ICON_STROKE } from "../../tokens";
@@ -266,6 +267,9 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						}
 						onMoveClip={({ clipId, trackId, startSec }) =>
 							commitElementMove({ editor, trackId, elementId: clipId, startSec })
+						}
+						onReorderMainTrack={({ trackId, orderedClipIds }) =>
+							commitMainTrackReorder({ editor, trackId, orderedElementIds: orderedClipIds })
 						}
 						transitions={transitionsVM}
 						onTransitionCommit={({ afterClipId, kind, durationSec, applyToAll }) =>

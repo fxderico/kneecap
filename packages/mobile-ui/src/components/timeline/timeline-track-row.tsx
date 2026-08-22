@@ -1,9 +1,10 @@
 import { useMemo } from "react";
-import type { TimelineTrackVM } from "../../timeline/types";
+import type { TimelineClipVM, TimelineTrackVM } from "../../timeline/types";
 import { visibleClipIndices } from "../../timeline/virtualization";
 import type { SnapTarget } from "../../timeline/snapping";
 import { TimelineClip, MIN_CLIP_DURATION_SEC, type TrimEdge } from "./timeline-clip";
 import { TransitionSquare } from "./transition-square";
+import { FilmstripThumbnail } from "./filmstrip-thumbnail";
 
 const CLIP_OVERSCAN_SEC = 5;
 
@@ -19,6 +20,19 @@ export interface MovePreview {
 	startSec: number;
 }
 
+/** Hold-to-reorder mode (CapCut long-press): while active, this row drops
+ *  the time scale entirely and renders every clip as a uniform tile; the
+ *  held tile rides the pointer, the rest shuffle around the insertion
+ *  slot. All coordinates are content-space px (same origin as clip lefts). */
+export interface ReorderState {
+	draggedClipId: string;
+	insertionIndex: number;
+	dragXPx: number;
+}
+
+export const REORDER_TILE_PX = 44;
+export const REORDER_STEP_PX = 50;
+
 export function TimelineTrackRow({
 	track,
 	pixelsPerSecond,
@@ -33,6 +47,9 @@ export function TimelineTrackRow({
 	movePreview,
 	onMovePreview,
 	onMoveEnd,
+	onLongPress,
+	onPanBy,
+	reorder,
 	snapTargets,
 	snapThresholdSec,
 	onKeyframeTap,
@@ -61,6 +78,15 @@ export function TimelineTrackRow({
 		candidateStartSec: number;
 	}) => void;
 	onMoveEnd?: (params: { clipId: string; trackId: string }) => void;
+	onLongPress?: (params: {
+		clipId: string;
+		trackId: string;
+		pointerId: number;
+		clientX: number;
+	}) => void;
+	onPanBy?: (params: { deltaPx: number }) => void;
+	/** Non-null puts THIS row into hold-to-reorder tile rendering. */
+	reorder?: ReorderState | null;
 	snapTargets: readonly SnapTarget[];
 	snapThresholdSec: number;
 	onKeyframeTap?: (params: { clipId: string; keyframeId: string }) => void;
@@ -80,6 +106,32 @@ export function TimelineTrackRow({
 	);
 
 	const visibleClips = endIndex >= startIndex ? track.clips.slice(startIndex, endIndex + 1) : [];
+
+	if (reorder) {
+		const ordered = [...track.clips].sort((a, b) => a.startSec - b.startSec);
+		const dragged = ordered.find((c) => c.id === reorder.draggedClipId);
+		const others = ordered.filter((c) => c.id !== reorder.draggedClipId);
+		return (
+			<div
+				className={`cc-timeline__track-row cc-timeline__track-row--${track.kind} cc-timeline__track-row--reorder`}
+			>
+				{others.map((clip, index) => {
+					const slot = index >= reorder.insertionIndex ? index + 1 : index;
+					return (
+						<ReorderTile key={clip.id} clip={clip} leftPx={slot * REORDER_STEP_PX} />
+					);
+				})}
+				{dragged && (
+					<ReorderTile
+						key={dragged.id}
+						clip={dragged}
+						leftPx={reorder.dragXPx - REORDER_TILE_PX / 2}
+						lifted
+					/>
+				)}
+			</div>
+		);
+	}
 
 	return (
 		<div className={`cc-timeline__track-row cc-timeline__track-row--${track.kind}`}>
@@ -161,6 +213,8 @@ export function TimelineTrackRow({
 						onTrimCommit={onTrimCommit}
 						onMovePreview={onMovePreview}
 						onMoveEnd={onMoveEnd}
+						onLongPress={onLongPress}
+						onPanBy={onPanBy}
 						minStartBoundSec={minStartBoundSec}
 						maxEndBoundSec={maxEndBoundSec}
 						snapTargets={snapTargets}
@@ -187,6 +241,36 @@ export function TimelineTrackRow({
 						/>
 					);
 				})}
+		</div>
+	);
+}
+
+/** One uniform clip tile in hold-to-reorder mode: the clip's first real
+ *  thumbnail (or its placeholder swatch) in a fixed square. Non-lifted
+ *  tiles CSS-transition between slots as the insertion index moves; the
+ *  lifted one rides the pointer with no transition (it must track the
+ *  finger exactly). */
+function ReorderTile({
+	clip,
+	leftPx,
+	lifted = false,
+}: {
+	clip: TimelineClipVM;
+	leftPx: number;
+	lifted?: boolean;
+}) {
+	return (
+		<div
+			className={`cc-timeline__reorder-tile${lifted ? " cc-timeline__reorder-tile--lifted" : ""}`}
+			style={{ left: leftPx, width: REORDER_TILE_PX }}
+			aria-hidden="true"
+		>
+			<FilmstripThumbnail
+				widthPx={REORDER_TILE_PX}
+				realUri={clip.thumbnails?.[0]}
+				colorHue={clip.colorHue}
+				slotSec={0}
+			/>
 		</div>
 	);
 }

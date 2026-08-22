@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { TimelineClipVM } from "../../timeline/types";
 import { pixelsToTime, timeToPixels } from "../../timeline/time-scale";
 import {
@@ -18,6 +18,9 @@ const TRACK_HEIGHT_PX = 48; // matches --cc-track-height; kept in sync by src/__
  *  taps and the strip's native horizontal scroll working on unselected clips —
  *  the same selection-gating rule the preview gestures adopted (round 23). */
 const MOVE_THRESHOLD_PX = 6;
+/** Hold duration before a clip LIFTS into reorder mode (CapCut long-press).
+ *  Movement past MOVE_THRESHOLD_PX before this fires cancels the hold. */
+const LONG_PRESS_MS = 450;
 
 export type TrimEdge = "start" | "end";
 
@@ -48,6 +51,21 @@ interface TimelineClipProps {
 	 *  `effectiveStartSec` prop, then commits on `onMoveEnd`. */
 	onMovePreview?: (params: { clipId: string; trackId: string; candidateStartSec: number }) => void;
 	onMoveEnd?: (params: { clipId: string; trackId: string }) => void;
+	/** CapCut hold-to-reorder: fires once when the pointer has stayed put on
+	 *  the clip body for LONG_PRESS_MS. The VIEW then owns the pointer via
+	 *  window listeners (this element may unmount when the row switches to
+	 *  reorder tiles), so no further events are reported here. */
+	onLongPress?: (params: {
+		clipId: string;
+		trackId: string;
+		pointerId: number;
+		clientX: number;
+	}) => void;
+	/** Manual strip pan: clips carry touch-action:none (our handlers own
+	 *  every touch), so a horizontal drag on an UNSELECTED clip pans the
+	 *  scroll strip through this callback instead of native scrolling
+	 *  (deltaPx = finger movement; the view applies it to scrollLeft). */
+	onPanBy?: (params: { deltaPx: number }) => void;
 }
 
 export function TimelineClip({
@@ -68,6 +86,8 @@ export function TimelineClip({
 	onKeyframeTap,
 	onMovePreview,
 	onMoveEnd,
+	onLongPress,
+	onPanBy,
 }: TimelineClipProps) {
 	const [trimEdge, setTrimEdge] = useState<TrimEdge | null>(null);
 	const dragRef = useRef<{
@@ -86,6 +106,25 @@ export function TimelineClip({
 		originalStartSec: number;
 		moving: boolean;
 	} | null>(null);
+	/** Long-press hold session (any clip body). Cancelled by movement past
+	 *  MOVE_THRESHOLD_PX or by pointer end before LONG_PRESS_MS. */
+	const pressRef = useRef<{
+		pointerId: number;
+		startClientX: number;
+		timer: ReturnType<typeof setTimeout>;
+	} | null>(null);
+	/** Manual strip-pan session (UNSELECTED clip body drags). */
+	const panRef = useRef<{
+		pointerId: number;
+		startClientX: number;
+		lastClientX: number;
+		panning: boolean;
+	} | null>(null);
+	useEffect(() => {
+		return () => {
+			if (pressRef.current) clearTimeout(pressRef.current.timer);
+		};
+	}, []);
 
 	const leftPx = timeToPixels({ timeSec: effectiveStartSec, pixelsPerSecond });
 	const widthPx = Math.max(
@@ -93,9 +132,33 @@ export function TimelineClip({
 		timeToPixels({ timeSec: effectiveDurationSec, pixelsPerSecond }),
 	);
 
+	const cancelLongPress = useCallback(() => {
+		if (pressRef.current) {
+			clearTimeout(pressRef.current.timer);
+			pressRef.current = null;
+		}
+	}, []);
+
 	const handleClipPointerDown = useCallback(
 		(event: React.PointerEvent) => {
 			event.stopPropagation();
+			if (onLongPress) {
+				cancelLongPress();
+				const pointerId = event.pointerId;
+				const clientX = event.clientX;
+				pressRef.current = {
+					pointerId,
+					startClientX: clientX,
+					timer: setTimeout(() => {
+						pressRef.current = null;
+						// The hold wins over whatever else this touch armed —
+						// the view owns the pointer from here (see onLongPress).
+						moveRef.current = null;
+						panRef.current = null;
+						onLongPress({ clipId: clip.id, trackId: clip.trackId, pointerId, clientX });
+					}, LONG_PRESS_MS),
+				};
+			}
 			if (isSelected && onMovePreview) {
 				// Second touch on a selected clip arms a move-drag; it only
 				// becomes one after the movement threshold (see pointermove).
@@ -105,43 +168,97 @@ export function TimelineClip({
 					originalStartSec: effectiveStartSec,
 					moving: false,
 				};
+			} else if (onPanBy) {
+				// Unselected clip: a horizontal drag pans the strip manually
+				// (clips have touch-action:none, so there's no native scroll
+				// to fall back on — see onPanBy's doc comment).
+				panRef.current = {
+					pointerId: event.pointerId,
+					startClientX: event.clientX,
+					lastClientX: event.clientX,
+					panning: false,
+				};
 			}
 			onSelect({ clipId: clip.id });
 		},
-		[clip.id, onSelect, isSelected, onMovePreview, effectiveStartSec],
+		[
+			clip.id,
+			clip.trackId,
+			onSelect,
+			isSelected,
+			onMovePreview,
+			onPanBy,
+			onLongPress,
+			cancelLongPress,
+			effectiveStartSec,
+		],
 	);
 
 	const handleClipPointerMove = useCallback(
 		(event: React.PointerEvent) => {
-			const move = moveRef.current;
-			if (!move || move.pointerId !== event.pointerId) return;
-			const deltaPx = event.clientX - move.startClientX;
-			if (!move.moving) {
-				if (Math.abs(deltaPx) < MOVE_THRESHOLD_PX) return;
-				move.moving = true;
-				// Same best-effort capture rule as beginTrim below: capture keeps
-				// the drag alive outside the clip's bounds but must never abort
-				// the gesture when the browser rejects the pointerId.
-				try {
-					event.currentTarget.setPointerCapture(event.pointerId);
-				} catch {
-					// Handlers stay bound to this element; the drag still works
-					// while the pointer remains over it.
-				}
+			const press = pressRef.current;
+			if (
+				press &&
+				press.pointerId === event.pointerId &&
+				Math.abs(event.clientX - press.startClientX) >= MOVE_THRESHOLD_PX
+			) {
+				cancelLongPress();
 			}
-			const candidateStartSec =
-				move.originalStartSec + pixelsToTime({ px: deltaPx, pixelsPerSecond });
-			onMovePreview?.({
-				clipId: clip.id,
-				trackId: clip.trackId,
-				candidateStartSec,
-			});
+
+			const move = moveRef.current;
+			if (move && move.pointerId === event.pointerId) {
+				const deltaPx = event.clientX - move.startClientX;
+				if (!move.moving) {
+					if (Math.abs(deltaPx) < MOVE_THRESHOLD_PX) return;
+					move.moving = true;
+					// Same best-effort capture rule as beginTrim below: capture
+					// keeps the drag alive outside the clip's bounds but must
+					// never abort the gesture when the browser rejects the
+					// pointerId.
+					try {
+						event.currentTarget.setPointerCapture(event.pointerId);
+					} catch {
+						// Handlers stay bound to this element; the drag still
+						// works while the pointer remains over it.
+					}
+				}
+				const candidateStartSec =
+					move.originalStartSec + pixelsToTime({ px: deltaPx, pixelsPerSecond });
+				onMovePreview?.({
+					clipId: clip.id,
+					trackId: clip.trackId,
+					candidateStartSec,
+				});
+				return;
+			}
+
+			const pan = panRef.current;
+			if (pan && pan.pointerId === event.pointerId) {
+				if (!pan.panning) {
+					if (Math.abs(event.clientX - pan.startClientX) < MOVE_THRESHOLD_PX) return;
+					pan.panning = true;
+					pan.lastClientX = event.clientX;
+					try {
+						event.currentTarget.setPointerCapture(event.pointerId);
+					} catch {
+						// Best-effort, same as above.
+					}
+					return;
+				}
+				onPanBy?.({ deltaPx: event.clientX - pan.lastClientX });
+				pan.lastClientX = event.clientX;
+			}
 		},
-		[clip.id, clip.trackId, pixelsPerSecond, onMovePreview],
+		[clip.id, clip.trackId, pixelsPerSecond, onMovePreview, onPanBy, cancelLongPress],
 	);
 
 	const handleClipPointerEnd = useCallback(
 		(event: React.PointerEvent) => {
+			cancelLongPress();
+			const pan = panRef.current;
+			if (pan && pan.pointerId === event.pointerId) {
+				panRef.current = null;
+			}
 			const move = moveRef.current;
 			if (!move || move.pointerId !== event.pointerId) return;
 			moveRef.current = null;
@@ -149,7 +266,7 @@ export function TimelineClip({
 				onMoveEnd?.({ clipId: clip.id, trackId: clip.trackId });
 			}
 		},
-		[clip.id, clip.trackId, onMoveEnd],
+		[clip.id, clip.trackId, onMoveEnd, cancelLongPress],
 	);
 
 	const beginTrim = useCallback(

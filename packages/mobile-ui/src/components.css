@@ -630,19 +630,18 @@
 	overflow: hidden;
 	background: var(--cc-bg-raised);
 	cursor: pointer;
-	/* Unselected clips let the browser keep the strip's native scroll pan —
-	   `none` here made every clip a dead zone for touch scrolling (and there
-	   was no move gesture either, so a drag on a clip did NOTHING on device).
-	   Selection promotes the clip to full gesture ownership below. */
-	touch-action: pan-x pan-y;
+	/* Every clip body owns its touches outright: move-drag (selected),
+	   long-press reorder (any clip), and MANUAL strip pan (unselected drags
+	   — timeline-clip.tsx onPanBy) all need pointer events the browser
+	   would otherwise cancel the moment it claimed the pan for scrolling.
+	   Round-24 briefly used pan-x here for native scroll; that killed the
+	   post-hold reorder drag on iOS (touch-action is decided at gesture
+	   start), so the pan is ours now too. */
+	touch-action: none;
 }
 .cc-timeline__clip--selected {
 	border: var(--cc-clip-selection-border);
 	z-index: 2;
-	/* The selected clip's body is a move-drag surface (timeline-clip.tsx) —
-	   our pointer handlers own every touch; without `none` iOS steals the
-	   horizontal drag for scrolling and fires pointercancel mid-move. */
-	touch-action: none;
 }
 .cc-timeline__clip-thumbnails {
 	position: absolute;
@@ -711,6 +710,40 @@
 	border-radius: var(--cc-radius-chip);
 	box-shadow: 0 0 0 1px rgb(0 0 0 / 40%);
 }
+/* Hold-to-reorder mode (CapCut long-press): the main track's clips render
+   as uniform tiles; the held one lifts and rides the finger, the rest
+   transition between slots. Everything not being reordered dims. */
+.cc-timeline__reorder-tile {
+	position: absolute;
+	top: 2px;
+	bottom: 2px;
+	border-radius: var(--cc-radius-chip);
+	overflow: hidden;
+	background: var(--cc-bg-raised);
+	transition: left 150ms ease;
+	z-index: 2;
+}
+.cc-timeline__reorder-tile .cc-timeline__clip-thumbnail {
+	height: 100%;
+	background-size: cover;
+	background-position: center;
+}
+.cc-timeline__reorder-tile--lifted {
+	transition: none;
+	transform: scale(1.12);
+	box-shadow: 0 4px 14px rgb(0 0 0 / 55%);
+	outline: 2px solid #ffffff;
+	z-index: 4;
+}
+.cc-timeline--reordering .cc-timeline__track-row:not(.cc-timeline__track-row--reorder),
+.cc-timeline--reordering .cc-timeline__add-clip,
+.cc-timeline--reordering .cc-timeline__add-audio,
+.cc-timeline--reordering .cc-timeline__leading-chips,
+.cc-timeline--reordering .cc-timeline__quick-add {
+	opacity: 0.3;
+	pointer-events: none;
+}
+
 .cc-timeline__trim-readout {
 	position: absolute;
 	top: -22px;
