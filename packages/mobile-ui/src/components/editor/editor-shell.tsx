@@ -226,15 +226,15 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 				onOpenExportSettings={() => setActiveSheet("export")}
 				onExport={() => setActiveSheet("export")}
 			/>
-			{/* Tap-to-toggle playback on the whole stage — CapCut behavior;
-			    on device the preview previously ignored taps entirely
-			    (founder feedback 2026-08-20). Pointer-up, not click, matches
-			    the timeline's touch conventions. */}
+			{/* NO tap-to-play on the stage (founder, 2026-08-22): the tap fired
+			    on the pointer-up that ENDED a preview gesture too — releasing
+			    a caption resize/text edit started playback. Play/pause lives
+			    on the PlaybackBar button ONLY (supersedes the 2026-08-20
+			    tap-to-toggle round). */}
 			<PreviewStage
 				canvasWidth={project.settings.canvasSize.width}
 				canvasHeight={project.settings.canvasSize.height}
 				backgroundColor={backgroundColor}
-				onTap={() => togglePlayback({ editor })}
 			>
 				{/* Real frame rendering (CanvasRenderer -> wgpu compositor) —
 				    replaces the chrome-only text-span placeholder; the renderer

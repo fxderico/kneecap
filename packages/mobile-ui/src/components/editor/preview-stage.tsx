@@ -2,8 +2,6 @@ import type { CSSProperties } from "react";
 import { cn } from "../../lib/cn";
 
 interface PreviewStageProps {
-	/** Fired on a tap/click anywhere on the stage (CapCut: toggles play). */
-	onTap?: () => void;
 	canvasWidth: number;
 	canvasHeight: number;
 	backgroundColor: string;
@@ -42,10 +40,14 @@ interface PreviewStageProps {
  * `.cc-preview-stage` / `.cc-preview-stage__canvas` for the full
  * before/after measurements.
  */
-export function PreviewStage({ canvasWidth, canvasHeight, backgroundColor, children, className, onTap }: PreviewStageProps) {
+export function PreviewStage({ canvasWidth, canvasHeight, backgroundColor, children, className }: PreviewStageProps) {
 	const aspectRatio = canvasWidth / canvasHeight;
 	return (
-		<div className={cn("cc-preview-stage", className)} onPointerUp={onTap ? () => onTap() : undefined}>
+		// Deliberately NO tap handler here: a stage-wide pointer-up toggle
+		// also caught the release of preview gestures (caption resize/text
+		// edit → instant playback; founder, 2026-08-22). Play/pause is the
+		// PlaybackBar button's job alone.
+		<div className={cn("cc-preview-stage", className)}>
 			<div
 				className="cc-preview-stage__canvas"
 				style={

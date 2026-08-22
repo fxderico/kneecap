@@ -190,7 +190,10 @@ function PreviewRendererInner() {
  * currently selected in the TIMELINE, and only then. One finger moves
  * (`transform.positionX/Y`, canvas units), two fingers pinch to scale
  * (`transform.scaleX/Y`) anywhere on the preview. Nothing selected →
- * touches do nothing but tap-to-play/pause.
+ * touches do nothing at all (stage tap-to-play was REMOVED 2026-08-22:
+ * the toggle also fired on the pointer-up ending a gesture — releasing a
+ * caption resize started playback; play/pause is the PlaybackBar button
+ * only).
  *
  * CAPTIONS MOVE AS ONE (round 23, founder: "if i can move one caption it
  * should move all of it around to same position and sizing — sync all
@@ -201,7 +204,8 @@ function PreviewRendererInner() {
  * Mid-gesture frames ride the engine's preview overlay
  * (`timeline.previewElements`); release commits ONE undoable
  * TracksSnapshotCommand (`timeline.commitPreview`). Tap semantics: only
- * real drags swallow the up-event; taps keep PreviewStage's play/pause.
+ * real drags swallow the up-event; plain taps bubble but nothing above
+ * listens anymore (see the stage-tap removal note in the header).
  */
 const DRAG_SLOP_PX = 6;
 
@@ -385,8 +389,8 @@ function usePreviewTransformGesture({
 			}
 
 			// Selection-gated: a touch only manipulates the element selected
-			// in the timeline. No selection → the touch is inert here and a
-			// tap falls through to PreviewStage's play/pause.
+			// in the timeline. No selection → the touch is fully inert (the
+			// stage has no tap handler anymore — see the header note).
 			if (selectionIsManipulable && selectedRef && selectedElement) {
 				openSession({
 					pointers: new Map([[event.pointerId, point]]),
@@ -428,7 +432,8 @@ function usePreviewTransformGesture({
 			}
 			const ended = endSession(true);
 			// Only a real drag swallows the up-event; a plain tap (session
-			// opened but never moved) stays the stage's play/pause tap.
+			// opened but never moved) bubbles — harmlessly, now that the
+			// stage has no tap-to-play handler.
 			if (ended?.dragging) {
 				event.stopPropagation();
 			}
