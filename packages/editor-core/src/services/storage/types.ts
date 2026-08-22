@@ -52,6 +52,17 @@ export interface MediaAssetData {
 	/** The original's display rotation (EXIF/track transform), needed when
 	 *  exporting from the source (the proxy is already baked upright). */
 	sourceRotationDegrees?: 0 | 90 | 180 | 270;
+	/** The ORIGINAL file's pixel dimensions. `width`/`height` above are the
+	 *  PROXY's for native imports (deliberate — the preview compositor works
+	 *  against the proxy), so anything sizing OUTPUT-quality decisions
+	 *  (canvas aspect adoption → export resolution) must read these instead:
+	 *  adopting from proxy dims silently pinned brand-new projects — and
+	 *  therefore every export — to the proxy's 540p class (founder's
+	 *  "grainy export", 2026-08-22). Missing on assets imported before this
+	 *  field existed and on web-fallback imports (where the proxy IS the
+	 *  source, so width/height are already the true dims). */
+	sourceWidth?: number;
+	sourceHeight?: number;
 }
 
 export type SerializedScene = Omit<TScene, "createdAt" | "updatedAt"> & {

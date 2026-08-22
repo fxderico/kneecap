@@ -11,6 +11,7 @@ import { requiresMediaId } from "@/timeline/element-utils";
 import type { MediaAsset } from "@/media/types";
 import { DEFAULT_NEW_ELEMENT_DURATION } from "@/timeline/creation";
 import { floatToFrameRate } from "@/fps/utils";
+import { normalizeAdoptedCanvasSize } from "@/canvas/sizes";
 import { graphicsRegistry, registerDefaultGraphics } from "@/graphics";
 import {
 	applyPlacement,
@@ -88,7 +89,14 @@ export class InsertElementCommand extends Command {
 			);
 
 			if (asset?.width && asset?.height) {
-				const nextCanvasSize = { width: asset.width, height: asset.height };
+				// SOURCE dims when known — on mobile `width`/`height` are the
+				// 540p preview proxy's, and copying them raw made the canvas
+				// (and so every export) proxy-resolution. Normalized to the
+				// 1080p class either way (see normalizeAdoptedCanvasSize).
+				const nextCanvasSize = normalizeAdoptedCanvasSize({
+					width: asset.sourceWidth ?? asset.width,
+					height: asset.sourceHeight ?? asset.height,
+				});
 				const shouldSetOriginalCanvasSize =
 					!activeProject?.settings.originalCanvasSize;
 				editor.project.updateSettings({

@@ -440,6 +440,14 @@ async function driveAndSample({
 	let exportOk = false;
 	let exportDetail = "not-run";
 	try {
+		{
+			// Export-resolution ground truth (the grainy-export hunt,
+			// 2026-08-22): the EDL exports at the project canvas — print it.
+			const settings = editor.project.getActive().settings;
+			log(
+				`canvas=${settings.canvasSize.width}x${settings.canvasSize.height} mode=${settings.canvasSizeMode ?? "(unset)"}`,
+			);
+		}
 		const { buildEdl } = await import("@kneecap/editor-core/edl");
 		const { toEdlMediaAssets, buildNativeEdlAssetResolver } = await import(
 			"@kneecap/mobile-ui"

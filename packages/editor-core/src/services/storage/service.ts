@@ -323,6 +323,8 @@ class StorageService {
 			thumbnailNativeRelativePath: mediaAsset.thumbnailNativeRelativePath,
 			sourceNativeRelativePath: mediaAsset.sourceNativeRelativePath,
 			sourceRotationDegrees: mediaAsset.sourceRotationDegrees,
+			sourceWidth: mediaAsset.sourceWidth,
+			sourceHeight: mediaAsset.sourceHeight,
 		};
 
 		try {
@@ -446,6 +448,8 @@ class StorageService {
 			thumbnailNativeRelativePath: metadata.thumbnailNativeRelativePath,
 			sourceNativeRelativePath: metadata.sourceNativeRelativePath,
 			sourceRotationDegrees: metadata.sourceRotationDegrees,
+			sourceWidth: metadata.sourceWidth,
+			sourceHeight: metadata.sourceHeight,
 		};
 	}
 

@@ -92,7 +92,23 @@ type ExportRunState = "idle" | "exporting" | "done" | "error";
  */
 export function ExportSheet({ editor, onClose }: ExportSheetProps) {
 	const project = editor.project.getActive();
-	const [resolutionId, setResolutionId] = useState("1080p");
+	// The chip must reflect the ACTUAL output: buildEdl exports at the
+	// project's canvasSize, so an untouched sheet showing a hardcoded
+	// "1080p" while the canvas was (say) proxy-class 540p silently lied —
+	// and that untouched default is exactly the grainy-export path
+	// (2026-08-22). Resolution presets mean the canvas's SHORT side (the
+	// "p" convention — a portrait 1080×1920 canvas is 1080p).
+	const canvasShortSide = Math.min(
+		project.settings.canvasSize.width,
+		project.settings.canvasSize.height,
+	);
+	const [resolutionId, setResolutionId] = useState(() => {
+		const nearest = [...RESOLUTIONS].sort(
+			(a, b) =>
+				Math.abs(a.height - canvasShortSide) - Math.abs(b.height - canvasShortSide),
+		)[0];
+		return nearest?.id ?? "1080p";
+	});
 	const [fpsId, setFpsId] = useState("30");
 	const [quality, setQuality] = useState<ExportQuality>("high");
 	const [format] = useState<ExportFormat>("mp4");
@@ -118,10 +134,18 @@ export function ExportSheet({ editor, onClose }: ExportSheetProps) {
 		setResolutionId(id);
 		const preset = RESOLUTIONS.find((r) => r.id === id);
 		if (!preset) return;
-		const aspect = project.settings.canvasSize.width / project.settings.canvasSize.height;
-		const height = preset.height;
-		const width = Math.round(height * aspect / 2) * 2; // even width, keeps current aspect
-		setProjectResolution({ editor, canvasSize: { width, height } });
+		// preset.height is the SHORT side ("1080p" on a portrait canvas is
+		// 1080×1920, not 608×1080 — the old height-is-vertical math DOWN-
+		// graded every portrait project the moment the chip was tapped).
+		const { width: cw, height: ch } = project.settings.canvasSize;
+		const aspect = cw / ch;
+		const even = (v: number) => Math.max(2, Math.round(v / 2) * 2);
+		const shortSide = preset.height;
+		const canvasSize =
+			aspect >= 1
+				? { width: even(shortSide * aspect), height: shortSide }
+				: { width: shortSide, height: even(shortSide / aspect) };
+		setProjectResolution({ editor, canvasSize });
 	};
 
 	const applyFps = (id: string) => {

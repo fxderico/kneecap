@@ -40,7 +40,18 @@ export function getAdoptedCanvasSizeForImportedMedia({
 	currentSize: TCanvasSize;
 	currentMode: "preset" | "custom" | undefined;
 	hadVisualMediaBefore: boolean;
-	importedAssets: Array<{ type: string; width?: number; height?: number }>;
+	importedAssets: Array<{
+		type: string;
+		width?: number;
+		height?: number;
+		/** True ORIGINAL dimensions — `width`/`height` are the preview
+		 *  PROXY's for native imports. Adoption must size from the source
+		 *  class: reading proxy dims made the "never upscale" guard pin a
+		 *  4K import's canvas (and so every export) to 540p (the grainy-
+		 *  export bug, 2026-08-22). */
+		sourceWidth?: number;
+		sourceHeight?: number;
+	}>;
 }): TCanvasSize | null {
 	if (hadVisualMediaBefore) return null;
 	if (currentMode !== undefined && currentMode !== "preset") return null;
@@ -54,28 +65,21 @@ export function getAdoptedCanvasSizeForImportedMedia({
 	const first = importedAssets.find(
 		(asset) =>
 			(asset.type === "video" || asset.type === "image") &&
-			(asset.width ?? 0) > 0 &&
-			(asset.height ?? 0) > 0,
+			((asset.sourceWidth ?? asset.width ?? 0) > 0) &&
+			((asset.sourceHeight ?? asset.height ?? 0) > 0),
 	);
 	if (!first) return null;
 
-	const sourceWidth = first.width as number;
-	const sourceHeight = first.height as number;
+	// Source dims when known (native imports store PROXY dims in
+	// width/height); proxy/true dims share the aspect either way, but the
+	// "never upscale" guard below needs the SOURCE's resolution class.
+	const sourceWidth = (first.sourceWidth ?? first.width) as number;
+	const sourceHeight = (first.sourceHeight ?? first.height) as number;
 
-	// Normalize: short side 1080 (never upscale a smaller source), then cap
-	// the long side at 1920 for extreme aspect ratios.
-	const shortSide = Math.min(sourceWidth, sourceHeight);
-	let scale = Math.min(1, 1080 / shortSide);
-	const longSide = Math.max(sourceWidth, sourceHeight) * scale;
-	if (longSide > 1920) {
-		scale *= 1920 / longSide;
-	}
-
-	const even = (v: number) => Math.max(2, Math.round(v / 2) * 2);
-	const adopted = {
-		width: even(sourceWidth * scale),
-		height: even(sourceHeight * scale),
-	};
+	const adopted = normalizeAdoptedCanvasSize({
+		width: sourceWidth,
+		height: sourceHeight,
+	});
 	if (
 		adopted.width === currentSize.width &&
 		adopted.height === currentSize.height
@@ -83,4 +87,31 @@ export function getAdoptedCanvasSizeForImportedMedia({
 		return null; // already exactly the default shape — nothing to do
 	}
 	return adopted;
+}
+
+/**
+ * The canonical "canvas from a source's dimensions" rule, shared by every
+ * canvas-adoption path (this module's first-import adoption AND
+ * InsertElementCommand's first-visual-element adoption — which used to
+ * copy `asset.width×height` RAW, i.e. the 540p PROXY dims on mobile, so
+ * every project's canvas and therefore every export was proxy-resolution;
+ * the grainy-export root cause, 2026-08-22): preserve the aspect exactly,
+ * normalize the short side to 1080 (never upscale a smaller source), cap
+ * the long side at 1920 for extreme aspects, keep dimensions even.
+ */
+export function normalizeAdoptedCanvasSize({
+	width,
+	height,
+}: {
+	width: number;
+	height: number;
+}): TCanvasSize {
+	const shortSide = Math.min(width, height);
+	let scale = Math.min(1, 1080 / shortSide);
+	const longSide = Math.max(width, height) * scale;
+	if (longSide > 1920) {
+		scale *= 1920 / longSide;
+	}
+	const even = (v: number) => Math.max(2, Math.round(v / 2) * 2);
+	return { width: even(width * scale), height: even(height * scale) };
 }

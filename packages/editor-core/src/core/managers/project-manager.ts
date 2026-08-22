@@ -534,7 +534,9 @@ export class ProjectManager {
 		importedAssets,
 		hadVisualMediaBefore,
 	}: {
-		importedAssets: Array<Pick<MediaAsset, "type" | "width" | "height">>;
+		importedAssets: Array<
+			Pick<MediaAsset, "type" | "width" | "height" | "sourceWidth" | "sourceHeight">
+		>;
 		hadVisualMediaBefore: boolean;
 	}): TCanvasSize | null {
 		if (!this.active) return null;

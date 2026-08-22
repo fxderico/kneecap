@@ -195,6 +195,12 @@ export function buildMediaAssetFromNativeImport({
 			root: mediaRoot,
 		}),
 		sourceRotationDegrees: readHandleRotation(handle),
+		// The ORIGINAL's pixel dimensions — `width`/`height` above are the
+		// proxy's. Output-quality sizing (canvas adoption → export
+		// resolution) must see the real source class, or a 4K import pins
+		// the whole project to the proxy's 540p (the grainy-export bug).
+		sourceWidth: handle.width > 0 ? handle.width : undefined,
+		sourceHeight: handle.height > 0 ? handle.height : undefined,
 	};
 }
 
