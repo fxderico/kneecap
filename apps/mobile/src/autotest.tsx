@@ -102,6 +102,29 @@ function plantedImageHandle(root: string): NativeMediaHandle {
 	return Object.assign({}, handle, { rotationDegrees: 0 });
 }
 
+/** The audio file the runner plants next to the video (regression coverage
+ *  for round 22's Files-picker audio import: proxy-less kinds take the
+ *  proxy-IS-the-source rule, get placed on an AUDIO track, and must join
+ *  the NATIVE preview mix — a clip the router can't map used to silently
+ *  kill the entire native session, i.e. ALL audio, on the device where
+ *  WebAudio renders silently; founder report 2026-08-20). */
+function plantedAudioHandle(root: string): NativeMediaHandle {
+	const handle: NativeMediaHandle = {
+		id: "autotest-audio",
+		uri: `${root}/Media/autotest-audio.m4a`,
+		kind: "audio",
+		fileName: "autotest-audio.m4a",
+		sizeBytes: 36_000,
+		durationMicros: 4_000_000,
+		width: 0,
+		height: 0,
+		hasAudio: true,
+		codec: "m4a",
+		frameRate: null,
+	};
+	return Object.assign({}, handle, { rotationDegrees: 0 });
+}
+
 async function waitFor<T>(
 	label: string,
 	probe: () => T | null | undefined | false,
@@ -165,9 +188,9 @@ async function runPhase({
 		pickMedia: async (opts) => {
 			// Exercise the pickProgress plumbing the way a real iCloud
 			// download would drive it.
-			opts.onProgress?.({ index: 0, total: 2, stage: "loading", fraction: 0.5 });
-			opts.onProgress?.({ index: 0, total: 2, stage: "loaded", fraction: 1 });
-			return [plantedHandle(root), plantedImageHandle(root)];
+			opts.onProgress?.({ index: 0, total: 3, stage: "loading", fraction: 0.5 });
+			opts.onProgress?.({ index: 0, total: 3, stage: "loaded", fraction: 1 });
+			return [plantedHandle(root), plantedImageHandle(root), plantedAudioHandle(root)];
 		},
 		// The cast mirrors how the real flow types out: `actions.ts` passes
 		// the bridge itself (method bivariance), while this explicit wrapper
@@ -183,12 +206,12 @@ async function runPhase({
 		editor,
 		projectId: editor.project.getActive().metadata.id,
 		source,
-		kinds: ["video", "image"],
+		kinds: ["video", "image", "audio"],
 		allowMultiple: true,
 		onProgress: (p) =>
 			log(`import ${p.fileName} ${p.stage} ${Math.round(p.fraction * 100)}%`),
 	});
-	if (failed.length > 0 || imported.length !== 2) {
+	if (failed.length > 0 || imported.length !== 3) {
 		throw new Error(
 			`import failed: imported=${imported.length} failed=${failed[0]?.error ?? "none"}`,
 		);
@@ -208,7 +231,12 @@ async function runPhase({
 					duration: mediaTimeFromSeconds({ seconds: asset.duration || 3 }),
 					startTime: editor.playback.getCurrentTime(),
 				}),
-				placement: { mode: "auto", trackType: "video" },
+				// Same per-kind routing as actions.ts: audio files land on an
+				// audio track (importAndPlaceAudio), visual media on video.
+				placement: {
+					mode: "auto",
+					trackType: asset.type === "audio" ? "audio" : "video",
+				},
 			}),
 		});
 	}
@@ -396,8 +424,11 @@ async function driveAndSample({
 	// clip has an audio track). Timeline follow: the strip must have
 	// scrolled while the clock ran (CapCut fixed-playhead model — the strip
 	// IS the tracking).
+	// nativeSkippedClips must be 0: a clip the router can't map is silent
+	// for the whole session (see audio-manager's tryStartNativeRoute) — the
+	// planted AUDIO file import (round 22) rides this exact path.
 	const audioOk = audio.routedNatively
-		? audio.failedSinks === 0
+		? audio.failedSinks === 0 && audio.nativeSkippedClips === 0
 		: audio.contextState === "running" &&
 			audio.failedSinks === 0 &&
 			audio.activeSinks + audio.decodedBuffers > 0;

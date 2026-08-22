@@ -13,6 +13,11 @@ import { AudioWaveformMini } from "./audio-waveform-mini";
 export const MIN_CLIP_DURATION_SEC = 0.2;
 const TARGET_THUMB_WIDTH_PX = 44;
 const TRACK_HEIGHT_PX = 48; // matches --cc-track-height; kept in sync by src/__tests__ (visual, not enforced by types)
+/** Horizontal px a pointer must travel on a SELECTED clip's body before the
+ *  gesture becomes a move-drag (below it, it's a tap → selection only). Keeps
+ *  taps and the strip's native horizontal scroll working on unselected clips —
+ *  the same selection-gating rule the preview gestures adopted (round 23). */
+const MOVE_THRESHOLD_PX = 6;
 
 export type TrimEdge = "start" | "end";
 
@@ -26,12 +31,23 @@ interface TimelineClipProps {
 	isSelected: boolean;
 	onSelect: (params: { clipId: string }) => void;
 	onTrimPreview: (params: { clipId: string; edge: TrimEdge; boundarySec: number }) => void;
-	onTrimCommit: (params: { clipId: string; edge: TrimEdge; boundarySec: number }) => void;
+	onTrimCommit: (params: {
+		clipId: string;
+		trackId: string;
+		edge: TrimEdge;
+		boundarySec: number;
+	}) => void;
 	minStartBoundSec: number;
 	maxEndBoundSec: number;
 	snapTargets: readonly SnapTarget[];
 	snapThresholdSec: number;
 	onKeyframeTap?: (params: { clipId: string; keyframeId: string }) => void;
+	/** Move-drag callbacks (selection-gated horizontal slide of the clip
+	 *  body). The clip reports RAW candidate start times; the view owns
+	 *  snapping/clamping and echoes the resolved position back through the
+	 *  `effectiveStartSec` prop, then commits on `onMoveEnd`. */
+	onMovePreview?: (params: { clipId: string; trackId: string; candidateStartSec: number }) => void;
+	onMoveEnd?: (params: { clipId: string; trackId: string }) => void;
 }
 
 export function TimelineClip({
@@ -50,6 +66,8 @@ export function TimelineClip({
 	snapTargets,
 	snapThresholdSec,
 	onKeyframeTap,
+	onMovePreview,
+	onMoveEnd,
 }: TimelineClipProps) {
 	const [trimEdge, setTrimEdge] = useState<TrimEdge | null>(null);
 	const dragRef = useRef<{
@@ -58,6 +76,15 @@ export function TimelineClip({
 		startClientX: number;
 		originalBoundarySec: number;
 		wasSnapped: boolean;
+	} | null>(null);
+	/** Move-drag session on the clip BODY. Armed on pointerdown of an
+	 *  already-selected clip, promoted to a real drag only past
+	 *  MOVE_THRESHOLD_PX so plain taps keep behaving as selection. */
+	const moveRef = useRef<{
+		pointerId: number;
+		startClientX: number;
+		originalStartSec: number;
+		moving: boolean;
 	} | null>(null);
 
 	const leftPx = timeToPixels({ timeSec: effectiveStartSec, pixelsPerSecond });
@@ -69,9 +96,60 @@ export function TimelineClip({
 	const handleClipPointerDown = useCallback(
 		(event: React.PointerEvent) => {
 			event.stopPropagation();
+			if (isSelected && onMovePreview) {
+				// Second touch on a selected clip arms a move-drag; it only
+				// becomes one after the movement threshold (see pointermove).
+				moveRef.current = {
+					pointerId: event.pointerId,
+					startClientX: event.clientX,
+					originalStartSec: effectiveStartSec,
+					moving: false,
+				};
+			}
 			onSelect({ clipId: clip.id });
 		},
-		[clip.id, onSelect],
+		[clip.id, onSelect, isSelected, onMovePreview, effectiveStartSec],
+	);
+
+	const handleClipPointerMove = useCallback(
+		(event: React.PointerEvent) => {
+			const move = moveRef.current;
+			if (!move || move.pointerId !== event.pointerId) return;
+			const deltaPx = event.clientX - move.startClientX;
+			if (!move.moving) {
+				if (Math.abs(deltaPx) < MOVE_THRESHOLD_PX) return;
+				move.moving = true;
+				// Same best-effort capture rule as beginTrim below: capture keeps
+				// the drag alive outside the clip's bounds but must never abort
+				// the gesture when the browser rejects the pointerId.
+				try {
+					event.currentTarget.setPointerCapture(event.pointerId);
+				} catch {
+					// Handlers stay bound to this element; the drag still works
+					// while the pointer remains over it.
+				}
+			}
+			const candidateStartSec =
+				move.originalStartSec + pixelsToTime({ px: deltaPx, pixelsPerSecond });
+			onMovePreview?.({
+				clipId: clip.id,
+				trackId: clip.trackId,
+				candidateStartSec,
+			});
+		},
+		[clip.id, clip.trackId, pixelsPerSecond, onMovePreview],
+	);
+
+	const handleClipPointerEnd = useCallback(
+		(event: React.PointerEvent) => {
+			const move = moveRef.current;
+			if (!move || move.pointerId !== event.pointerId) return;
+			moveRef.current = null;
+			if (move.moving) {
+				onMoveEnd?.({ clipId: clip.id, trackId: clip.trackId });
+			}
+		},
+		[clip.id, clip.trackId, onMoveEnd],
 	);
 
 	const beginTrim = useCallback(
@@ -159,11 +237,16 @@ export function TimelineClip({
 			// has already updated to the previewed value).
 			const boundarySec =
 				drag.edge === "start" ? effectiveStartSec : effectiveStartSec + effectiveDurationSec;
-			onTrimCommit({ clipId: clip.id, edge: drag.edge, boundarySec });
+			onTrimCommit({
+				clipId: clip.id,
+				trackId: clip.trackId,
+				edge: drag.edge,
+				boundarySec,
+			});
 			dragRef.current = null;
 			setTrimEdge(null);
 		},
-		[clip.id, effectiveStartSec, effectiveDurationSec, onTrimCommit],
+		[clip.id, clip.trackId, effectiveStartSec, effectiveDurationSec, onTrimCommit],
 	);
 
 	const durationLabel = formatClipDuration({ durationSec: effectiveDurationSec });
@@ -173,6 +256,9 @@ export function TimelineClip({
 			className={`cc-timeline__clip cc-timeline__clip--${clip.kind}${isSelected ? " cc-timeline__clip--selected" : ""}`}
 			style={{ left: leftPx, width: widthPx }}
 			onPointerDown={handleClipPointerDown}
+			onPointerMove={handleClipPointerMove}
+			onPointerUp={handleClipPointerEnd}
+			onPointerCancel={handleClipPointerEnd}
 			role="button"
 			tabIndex={0}
 			aria-label={`${clip.name}, ${durationLabel}${isSelected ? ", selected" : ""}`}

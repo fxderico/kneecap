@@ -1,7 +1,10 @@
-import {
-	getSourceSpanAtClipTime,
-	getTimelineDurationForSourceSpan,
-} from "@/retime";
+// Specific modules, NOT the "@/retime" barrel: the barrel re-exports
+// audio-stretch.ts (soundtouchjs, no type declarations), which would leak a
+// TS7016 into every downstream package whose tsc program reaches the
+// timeline index (native-bridge's standalone typecheck caught this when
+// this file moved into editor-core, 2026-08-22).
+import { getSourceSpanAtClipTime } from "@/retime/split";
+import { getTimelineDurationForSourceSpan } from "@/retime/resolve";
 import {
 	addMediaTime,
 	clampMediaTime,

@@ -17,11 +17,15 @@ import {
 } from "../../timeline/time-scale";
 import { usePinchZoom } from "../../timeline/use-pinch-zoom";
 import { useElementSize } from "../../timeline/use-element-size";
-import { buildSnapTargets } from "../../timeline/snapping";
+import { buildSnapTargets, resolveSnap } from "../../timeline/snapping";
 import { hapticTick } from "../../timeline/haptics";
 import { TimelineRuler } from "./timeline-ruler";
 import { TimelinePlayhead } from "./timeline-playhead";
-import { TimelineTrackRow, type TrimPreview } from "./timeline-track-row";
+import {
+	TimelineTrackRow,
+	type MovePreview,
+	type TrimPreview,
+} from "./timeline-track-row";
 import { TransitionSheet } from "./transition-sheet";
 import type { TrimEdge } from "./timeline-clip";
 
@@ -112,6 +116,24 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		durationSec: number;
 		applyToAll: boolean;
 	}) => void;
+	/** ENGINE-BACKED trim commit (the M7-completion wiring the old no-op
+	 *  `handleTrimCommit` comment promised): fired once per finished handle
+	 *  drag with the FINAL previewed boundary. The live shell turns it into
+	 *  editor-core's resize math + an undoable UpdateElementsCommand; absent
+	 *  (the dev harness) the preview still rubber-bands back, as before. */
+	onTrimClip?: (params: {
+		clipId: string;
+		trackId: string;
+		edge: TrimEdge;
+		boundarySec: number;
+	}) => void;
+	/** ENGINE-BACKED move commit: fired once per finished clip-body drag
+	 *  with the snapped/clamped start time the preview last showed. */
+	onMoveClip?: (params: {
+		clipId: string;
+		trackId: string;
+		startSec: number;
+	}) => void;
 }>(function TimelineView(
 	{
 		project,
@@ -131,6 +153,8 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		onClearSelection,
 		transitions: transitionsProp,
 		onTransitionCommit,
+		onTrimClip,
+		onMoveClip,
 	},
 	ref,
 ) {
@@ -141,6 +165,9 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	const selectedClipId =
 		selectedClipIdProp !== undefined ? selectedClipIdProp : localSelectedClipId;
 	const [trimPreview, setTrimPreview] = useState<TrimPreview | null>(null);
+	const [movePreview, setMovePreview] = useState<MovePreview | null>(null);
+	const movePreviewRef = useRef<MovePreview | null>(null);
+	const moveWasSnappedRef = useRef(false);
 	const [snapIndicatorSec, setSnapIndicatorSec] = useState<number | null>(null);
 	const [localTransitions, setLocalTransitions] = useState<Record<string, Transition>>({});
 	// Engine-backed when the shell provides them; local view-model otherwise
@@ -312,17 +339,113 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		[snapTargets],
 	);
 
-	const handleTrimCommit = useCallback(() => {
-		setTrimPreview(null);
-		setSnapIndicatorSec(null);
-		// NOTE: this view-model layer does not persist trims back into
-		// `project` — a live integration commits through editor-core's own
-		// resize command (apps/web/src/timeline/controllers/resize-controller.ts
-		// / packages/editor-core/src/commands/timeline) instead of mutating
-		// this component's local state, which is why there's no
-		// `onTrimCommit` prop threading a new value out of this component.
-		// See M7 handoff notes.
-	}, []);
+	const handleTrimCommit = useCallback(
+		(params: {
+			clipId: string;
+			trackId: string;
+			edge: TrimEdge;
+			boundarySec: number;
+		}) => {
+			setTrimPreview(null);
+			setSnapIndicatorSec(null);
+			// The M7-completion wiring: the live shell commits through
+			// editor-core's resize math (see `onTrimClip`'s doc comment); the
+			// dev harness omits the prop and keeps the old rubber-band-back.
+			onTrimClip?.(params);
+		},
+		[onTrimClip],
+	);
+
+	/** Snap + clamp a raw clip-body drag candidate, publish the preview.
+	 *  Both of the dragged clip's edges compete for the nearest snap target
+	 *  (its OWN edges are excluded from the target set — a clip must not
+	 *  snap to itself). Non-main tracks clamp into the gap between the
+	 *  clip's original neighbors (free-position tracks don't overlap); the
+	 *  main track drags freely — its commit re-butts the whole track. */
+	const handleMovePreview = useCallback(
+		(params: { clipId: string; trackId: string; candidateStartSec: number }) => {
+			const track = project.tracks.find((t) => t.id === params.trackId);
+			const clipIndex = track?.clips.findIndex((c) => c.id === params.clipId) ?? -1;
+			const clip = clipIndex >= 0 ? track?.clips[clipIndex] : undefined;
+			if (!track || !clip) return;
+
+			let candidate = Math.max(0, params.candidateStartSec);
+			if (track.kind !== "main") {
+				const prev = track.clips[clipIndex - 1];
+				const next = track.clips[clipIndex + 1];
+				const lower = prev ? prev.startSec + prev.durationSec : 0;
+				const upper = next
+					? next.startSec - clip.durationSec
+					: Number.POSITIVE_INFINITY;
+				candidate = Math.min(Math.max(candidate, lower), Math.max(lower, upper));
+			}
+
+			const edges: number[] = [];
+			for (const t of project.tracks) {
+				for (const c of t.clips) {
+					if (c.id === params.clipId) continue;
+					edges.push(c.startSec, c.startSec + c.durationSec);
+				}
+			}
+			const targets = buildSnapTargets({
+				clipEdgesSec: edges,
+				playheadSec: currentTimeSec,
+				durationSec: project.durationSec,
+			});
+			const startSnap = resolveSnap({
+				candidateSec: candidate,
+				targets,
+				thresholdSec: snapThresholdSec,
+			});
+			const endSnap = resolveSnap({
+				candidateSec: candidate + clip.durationSec,
+				targets,
+				thresholdSec: snapThresholdSec,
+			});
+			let resolvedStartSec = candidate;
+			let snappedTargetSec: number | null = null;
+			const startDistance = startSnap.target
+				? Math.abs(startSnap.snappedSec - candidate)
+				: Number.POSITIVE_INFINITY;
+			const endDistance = endSnap.target
+				? Math.abs(endSnap.snappedSec - (candidate + clip.durationSec))
+				: Number.POSITIVE_INFINITY;
+			if (startDistance <= endDistance && startSnap.target) {
+				resolvedStartSec = startSnap.snappedSec;
+				snappedTargetSec = startSnap.target.timeSec;
+			} else if (endSnap.target) {
+				resolvedStartSec = endSnap.snappedSec - clip.durationSec;
+				snappedTargetSec = endSnap.target.timeSec;
+			}
+			resolvedStartSec = Math.max(0, resolvedStartSec);
+
+			if (snappedTargetSec !== null && !moveWasSnappedRef.current) hapticTick();
+			moveWasSnappedRef.current = snappedTargetSec !== null;
+			setSnapIndicatorSec(snappedTargetSec);
+			const preview = { clipId: params.clipId, startSec: resolvedStartSec };
+			movePreviewRef.current = preview;
+			setMovePreview(preview);
+		},
+		[project.tracks, project.durationSec, currentTimeSec, snapThresholdSec],
+	);
+
+	const handleMoveEnd = useCallback(
+		(params: { clipId: string; trackId: string }) => {
+			const preview = movePreviewRef.current;
+			movePreviewRef.current = null;
+			moveWasSnappedRef.current = false;
+			setMovePreview(null);
+			setSnapIndicatorSec(null);
+			if (preview && preview.clipId === params.clipId) {
+				onMoveClip?.({
+					clipId: params.clipId,
+					trackId: params.trackId,
+					startSec: preview.startSec,
+				});
+			}
+		},
+		[onMoveClip],
+	);
 
 	const mainTrack = project.tracks.find((t) => t.kind === "main");
 	const mainTrackEndPx = mainTrack
@@ -439,6 +562,9 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 							trimPreview={trimPreview}
 							onTrimPreview={handleTrimPreview}
 							onTrimCommit={handleTrimCommit}
+							movePreview={movePreview}
+							onMovePreview={onMoveClip ? handleMovePreview : undefined}
+							onMoveEnd={onMoveClip ? handleMoveEnd : undefined}
 							snapTargets={snapTargets}
 							snapThresholdSec={snapThresholdSec}
 							transitionAfterClipIds={

@@ -46,6 +46,8 @@ import {
 	importAndPlaceMedia,
 	setProjectResolution,
 	setProjectBackground,
+	commitElementTrim,
+	commitElementMove,
 } from "../../editor/actions";
 import { Scissors, Trash2, CopyPlus, SlidersHorizontal, Type, VolumeX, WandSparkles, ImagePlus } from "lucide-react";
 import { CC_ICON_STROKE } from "../../tokens";
@@ -259,6 +261,12 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						}
 						selectedClipId={selectedRef?.elementId ?? null}
 						onClearSelection={() => selectElement({ editor, ref: null })}
+						onTrimClip={({ clipId, trackId, edge, boundarySec }) =>
+							commitElementTrim({ editor, trackId, elementId: clipId, edge, boundarySec })
+						}
+						onMoveClip={({ clipId, trackId, startSec }) =>
+							commitElementMove({ editor, trackId, elementId: clipId, startSec })
+						}
 						transitions={transitionsVM}
 						onTransitionCommit={({ afterClipId, kind, durationSec, applyToAll }) =>
 							setMainTrackTransition({

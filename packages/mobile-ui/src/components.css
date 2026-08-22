@@ -630,11 +630,19 @@
 	overflow: hidden;
 	background: var(--cc-bg-raised);
 	cursor: pointer;
-	touch-action: none;
+	/* Unselected clips let the browser keep the strip's native scroll pan —
+	   `none` here made every clip a dead zone for touch scrolling (and there
+	   was no move gesture either, so a drag on a clip did NOTHING on device).
+	   Selection promotes the clip to full gesture ownership below. */
+	touch-action: pan-x pan-y;
 }
 .cc-timeline__clip--selected {
 	border: var(--cc-clip-selection-border);
 	z-index: 2;
+	/* The selected clip's body is a move-drag surface (timeline-clip.tsx) —
+	   our pointer handlers own every touch; without `none` iOS steals the
+	   horizontal drag for scrolling and fires pointercancel mid-move. */
+	touch-action: none;
 }
 .cc-timeline__clip-thumbnails {
 	position: absolute;

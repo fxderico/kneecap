@@ -66,6 +66,11 @@ export class AudioManager {
 	 *  (media/native-audio-router.ts) — the WebAudio scheduling below is
 	 *  skipped entirely for the session. */
 	private routedNatively = false;
+	/** Clips the last native-route start had to leave OUT of the mix (no
+	 *  native-backed path) — diagnostics for getStats()/#autotest; anything
+	 *  above 0 means some clip is silent this session and a
+	 *  `[kneecap-audio]` warn named it. */
+	private lastNativeSkippedCount = 0;
 	private unsubscribers: Array<() => void> = [];
 
 	constructor(private editor: EditorCore) {
@@ -223,9 +228,17 @@ export class AudioManager {
 
 	/** Maps the session's audible clips into the native router's schedule
 	 *  and starts it. False (→ WebAudio fallback) when no router is
-	 *  registered, any clip has no native-backed path, or the platform
-	 *  declines. All-or-nothing on purpose: half-native half-web mixing
-	 *  would double-play whichever clips both sides can handle. */
+	 *  registered, NO clip has a native-backed path, or the platform
+	 *  declines.
+	 *
+	 *  Per-clip skip, not all-or-nothing (changed 2026-08-20): one clip
+	 *  without a native path (a blob:-backed asset, a stale URL) used to
+	 *  abort the WHOLE native session — and on the device this router
+	 *  exists for, the WebAudio fallback renders SILENTLY, so importing one
+	 *  such clip killed ALL audio ("audio breaks entirely when I import
+	 *  audio"). A skipped clip cannot double-play: when this returns true
+	 *  the WebAudio scheduling below never runs for the session, so the
+	 *  skipped clip is simply silent — and named loudly in the console. */
 	private async tryStartNativeRoute({
 		atSec,
 	}: {
@@ -235,12 +248,19 @@ export class AudioManager {
 		if (!router) return false;
 
 		const schedule: NativeAudioRouterClip[] = [];
+		this.lastNativeSkippedCount = 0;
+		let skippedCount = 0;
 		for (const clip of this.clips) {
 			if (clip.muted) continue;
 			const url = clip.url;
-			if (!url) return false;
-			const path = router.toNativePath(url);
-			if (!path) return false;
+			const path = url ? router.toNativePath(url) : null;
+			if (!path) {
+				skippedCount++;
+				console.warn(
+					`[kneecap-audio] clip ${clip.id} has no native-backed path (url=${url ?? "(none)"}) — skipped in the native mix, it will be silent this session`,
+				);
+				continue;
+			}
 			schedule.push({
 				path,
 				startSec: clip.startTime,
@@ -251,6 +271,12 @@ export class AudioManager {
 			});
 		}
 		if (schedule.length === 0) return false;
+		this.lastNativeSkippedCount = skippedCount;
+		if (skippedCount > 0) {
+			console.warn(
+				`[kneecap-audio] native mix starting with ${skippedCount} clip(s) skipped of ${schedule.length + skippedCount}`,
+			);
+		}
 		try {
 			return await router.start({ clips: schedule, atSec });
 		} catch (error) {
@@ -621,6 +647,7 @@ export class AudioManager {
 		activeClips: number;
 		queuedSources: number;
 		routedNatively: boolean;
+		nativeSkippedClips: number;
 	} {
 		return {
 			contextState: this.audioContext?.state ?? "none",
@@ -631,6 +658,7 @@ export class AudioManager {
 			activeClips: this.activeClipIds.size,
 			queuedSources: this.queuedSources.size,
 			routedNatively: this.routedNatively,
+			nativeSkippedClips: this.lastNativeSkippedCount,
 		};
 	}
 

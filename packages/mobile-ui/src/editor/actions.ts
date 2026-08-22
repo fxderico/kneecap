@@ -31,7 +31,16 @@ import {
 	findTrackInSceneTracks,
 	calculateTotalDuration,
 	isVisualElement,
+	computeGroupResize,
+	type GroupResizeMember,
 } from "@kneecap/editor-core/timeline";
+import {
+	addMediaTime,
+	subMediaTime,
+	maxMediaTime,
+	mediaTime,
+	roundFrameTicks,
+} from "@kneecap/editor-core/wasm";
 import { registerDefaultGraphics } from "@kneecap/editor-core/graphics";
 import { buildElementFromMedia } from "@kneecap/editor-core/timeline";
 import { rewriteCaptionWords } from "./caption-text";
@@ -121,6 +130,238 @@ export function deleteSelected({ editor, refs }: { editor: EditorCore; refs: Ele
 
 export function duplicateSelected({ editor, refs }: { editor: EditorCore; refs: ElementRef[] }): void {
 	editor.command.execute({ command: new DuplicateElementsCommand({ elements: refs }) });
+}
+
+/**
+ * Timeline trim commit (the founder's "can't trim / can't extend back out
+ * after split" fix): turns a finished handle drag into ONE undoable
+ * UpdateElementsCommand through editor-core's `computeGroupResize` — the
+ * same frame-snapped, source-extent-clamped math the desktop timeline uses
+ * (trimStart/trimEnd move with the edge, so a split clip's cut-off material
+ * can be pulled back out; extension stops at the real source extent).
+ *
+ * The MAIN track is magnetic, CapCut-style: the trimmed clip's neighbors
+ * never bound the drag — instead every element at-or-after the clip's end
+ * RIPPLES by the applied delta so the track stays butted. A left-edge trim
+ * additionally pins the clip's startTime (the in-point changes, the clip
+ * stays glued to its previous neighbor — magnetic-timeline semantics, not
+ * the desktop's slide-the-start behavior). Free-position tracks keep their
+ * neighbor bounds and don't ripple.
+ */
+export function commitElementTrim({
+	editor,
+	trackId,
+	elementId,
+	edge,
+	boundarySec,
+}: {
+	editor: EditorCore;
+	trackId: string;
+	elementId: string;
+	edge: "start" | "end";
+	boundarySec: number;
+}): void {
+	const tracks = editor.scenes.getActiveScene().tracks;
+	const track = findTrackInSceneTracks({ tracks, trackId });
+	const element = track?.elements.find((el) => el.id === elementId);
+	const fps = editor.project.getActive().settings.fps;
+	if (!track || !element) return;
+
+	const isMainTrack = tracks.main.id === trackId;
+	const side = edge === "start" ? ("left" as const) : ("right" as const);
+	const originalEnd = addMediaTime({ a: element.startTime, b: element.duration });
+	const boundary = mediaTimeFromSeconds({ seconds: boundarySec });
+	const deltaTime =
+		side === "left"
+			? subMediaTime({ a: boundary, b: element.startTime })
+			: subMediaTime({ a: boundary, b: originalEnd });
+
+	let leftNeighborBound: MediaTime | null = null;
+	let rightNeighborBound: MediaTime | null = null;
+	if (isMainTrack && side === "left") {
+		// Magnetic left-trim pins startTime, so the absolute-0 floor that a
+		// null bound implies ("can't drag the start before time 0") does not
+		// apply — extending the FIRST clip's in-point is legal and pushes
+		// everything right. A far-left synthetic bound leaves the source
+		// extent (or nothing, for unbounded elements) as the only clamp.
+		leftNeighborBound = subMediaTime({
+			a: element.startTime,
+			b: mediaTime({ ticks: 2 ** 52 }),
+		});
+	}
+	if (!isMainTrack) {
+		for (const other of track.elements) {
+			if (other.id === elementId) continue;
+			const otherEnd = addMediaTime({ a: other.startTime, b: other.duration });
+			if (otherEnd <= element.startTime) {
+				leftNeighborBound =
+					leftNeighborBound === null
+						? otherEnd
+						: maxMediaTime({ a: leftNeighborBound, b: otherEnd });
+			}
+			if (other.startTime >= originalEnd) {
+				rightNeighborBound =
+					rightNeighborBound === null || other.startTime < rightNeighborBound
+						? other.startTime
+						: rightNeighborBound;
+			}
+		}
+	}
+
+	const member: GroupResizeMember = {
+		trackId,
+		elementId,
+		startTime: element.startTime,
+		duration: element.duration,
+		trimStart: element.trimStart,
+		trimEnd: element.trimEnd,
+		sourceDuration:
+			element.type === "video" || element.type === "audio"
+				? element.sourceDuration
+				: undefined,
+		retime: "retime" in element ? element.retime : undefined,
+		leftNeighborBound,
+		rightNeighborBound,
+	};
+	const { deltaTime: applied, updates } = computeGroupResize({
+		members: [member],
+		side,
+		deltaTime,
+		fps,
+	});
+	if (updates.length === 0 || applied === 0) return;
+
+	const patches: Array<{
+		trackId: string;
+		elementId: string;
+		patch: Partial<TimelineElement>;
+	}> = [
+		{
+			trackId,
+			elementId,
+			patch:
+				isMainTrack && side === "left"
+					? { ...updates[0].patch, startTime: element.startTime }
+					: updates[0].patch,
+		},
+	];
+
+	if (isMainTrack) {
+		// Ripple: the clip's end edge moved by `applied` (right side) or by
+		// `-applied` (left side, start pinned) — shift everything after it
+		// by the same amount so the main track stays butted.
+		const shift =
+			side === "right" ? applied : subMediaTime({ a: ZERO_MEDIA_TIME, b: applied });
+		if (shift !== 0) {
+			for (const other of track.elements) {
+				if (other.id === elementId || other.startTime < originalEnd) continue;
+				patches.push({
+					trackId,
+					elementId: other.id,
+					patch: {
+						startTime: maxMediaTime({
+							a: ZERO_MEDIA_TIME,
+							b: addMediaTime({ a: other.startTime, b: shift }),
+						}),
+					},
+				});
+			}
+		}
+	}
+
+	editor.command.execute({ command: new UpdateElementsCommand({ updates: patches }) });
+}
+
+/**
+ * Timeline move commit (the founder's "can't move clips left and right"):
+ * one finished clip-body drag → ONE undoable UpdateElementsCommand.
+ *
+ * Free-position tracks (audio/overlay/text) slide the clip inside the gap
+ * between its neighbors. The MAIN track is magnetic: the drop position only
+ * decides the clip's ORDER (sorted by midpoint, CapCut reorder semantics),
+ * then the whole track re-lays out butted from 0 — which also heals any
+ * gaps left by earlier deletes.
+ */
+export function commitElementMove({
+	editor,
+	trackId,
+	elementId,
+	startSec,
+}: {
+	editor: EditorCore;
+	trackId: string;
+	elementId: string;
+	startSec: number;
+}): void {
+	const tracks = editor.scenes.getActiveScene().tracks;
+	const track = findTrackInSceneTracks({ tracks, trackId });
+	const element = track?.elements.find((el) => el.id === elementId);
+	const fps = editor.project.getActive().settings.fps;
+	if (!track || !element) return;
+
+	const candidate = mediaTime({
+		ticks: roundFrameTicks({
+			ticks: Math.max(0, mediaTimeFromSeconds({ seconds: startSec })),
+			fps,
+		}),
+	});
+	const isMainTrack = tracks.main.id === trackId;
+
+	if (!isMainTrack) {
+		const originalEnd = addMediaTime({ a: element.startTime, b: element.duration });
+		let lower = ZERO_MEDIA_TIME;
+		let upper: MediaTime | null = null;
+		for (const other of track.elements) {
+			if (other.id === elementId) continue;
+			const otherEnd = addMediaTime({ a: other.startTime, b: other.duration });
+			if (otherEnd <= element.startTime) lower = maxMediaTime({ a: lower, b: otherEnd });
+			if (other.startTime >= originalEnd) {
+				const maxStart = subMediaTime({ a: other.startTime, b: element.duration });
+				upper = upper === null || maxStart < upper ? maxStart : upper;
+			}
+		}
+		let next = candidate < lower ? lower : candidate;
+		if (upper !== null && next > upper) next = maxMediaTime({ a: lower, b: upper });
+		if (next === element.startTime) return;
+		editor.command.execute({
+			command: new UpdateElementsCommand({
+				updates: [{ trackId, elementId, patch: { startTime: next } }],
+			}),
+		});
+		return;
+	}
+
+	// Main track: order by midpoint with the dragged clip at its candidate
+	// position, then re-butt sequentially from 0. The dragged clip's key is
+	// nudged half a tick toward its drag direction so an exact midpoint tie
+	// (equal-duration clips with the candidate clamped at 0) resolves in the
+	// direction the user pulled instead of silently keeping the old order.
+	const dragBias = candidate < element.startTime ? -0.5 : 0.5;
+	const ordered = [...track.elements].sort((a, b) => {
+		const aMid =
+			a.id === elementId
+				? candidate + a.duration / 2 + dragBias
+				: a.startTime + a.duration / 2;
+		const bMid =
+			b.id === elementId
+				? candidate + b.duration / 2 + dragBias
+				: b.startTime + b.duration / 2;
+		return aMid - bMid;
+	});
+	const updates: Array<{
+		trackId: string;
+		elementId: string;
+		patch: Partial<TimelineElement>;
+	}> = [];
+	let cursor = ZERO_MEDIA_TIME;
+	for (const el of ordered) {
+		if (el.startTime !== cursor) {
+			updates.push({ trackId, elementId: el.id, patch: { startTime: cursor } });
+		}
+		cursor = addMediaTime({ a: cursor, b: el.duration });
+	}
+	if (updates.length === 0) return;
+	editor.command.execute({ command: new UpdateElementsCommand({ updates }) });
 }
 
 /** Round 21.4 — caption text edited as a plain string (see

@@ -52,6 +52,21 @@ export interface TimelineClipVM {
 	startSec: number;
 	durationSec: number;
 	/**
+	 * Source-trim state (float seconds, SOURCE time domain), for computing
+	 * how far a trim handle may EXTEND an edge back out — the CapCut
+	 * "un-trim after split" gesture. `trimStartSec`/`trimEndSec` are how
+	 * much source material is currently cut off each end;
+	 * `sourceDurationSec` is undefined for elements with no finite source
+	 * (text/sticker/image), which may extend without limit. `retimeRate`
+	 * converts source seconds to timeline seconds (source / rate = clip).
+	 * Preview-only convenience — the COMMIT path re-derives bounds in
+	 * integer ticks through editor-core's `computeGroupResize`.
+	 */
+	trimStartSec?: number;
+	trimEndSec?: number;
+	sourceDurationSec?: number;
+	retimeRate?: number;
+	/**
 	 * A stable per-clip color, used for the color bar under filmstrip
 	 * thumbnails / behind the waveform, and for the placeholder thumbnail
 	 * pattern (see filmstrip-thumbnail.tsx) — NOT a CapCut-measured token,

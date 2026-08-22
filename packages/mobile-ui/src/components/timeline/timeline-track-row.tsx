@@ -13,6 +13,12 @@ export interface TrimPreview {
 	boundarySec: number;
 }
 
+export interface MovePreview {
+	clipId: string;
+	/** Already snapped/clamped by the view — the row just renders it. */
+	startSec: number;
+}
+
 export function TimelineTrackRow({
 	track,
 	pixelsPerSecond,
@@ -24,6 +30,9 @@ export function TimelineTrackRow({
 	trimPreview,
 	onTrimPreview,
 	onTrimCommit,
+	movePreview,
+	onMovePreview,
+	onMoveEnd,
 	snapTargets,
 	snapThresholdSec,
 	onKeyframeTap,
@@ -39,7 +48,19 @@ export function TimelineTrackRow({
 	onSelectClip: (params: { clipId: string }) => void;
 	trimPreview: TrimPreview | null;
 	onTrimPreview: (params: { clipId: string; edge: TrimEdge; boundarySec: number }) => void;
-	onTrimCommit: (params: { clipId: string; edge: TrimEdge; boundarySec: number }) => void;
+	onTrimCommit: (params: {
+		clipId: string;
+		trackId: string;
+		edge: TrimEdge;
+		boundarySec: number;
+	}) => void;
+	movePreview: MovePreview | null;
+	onMovePreview?: (params: {
+		clipId: string;
+		trackId: string;
+		candidateStartSec: number;
+	}) => void;
+	onMoveEnd?: (params: { clipId: string; trackId: string }) => void;
 	snapTargets: readonly SnapTarget[];
 	snapThresholdSec: number;
 	onKeyframeTap?: (params: { clipId: string; keyframeId: string }) => void;
@@ -66,10 +87,42 @@ export function TimelineTrackRow({
 				const index = startIndex + offset;
 				const prevClip = track.clips[index - 1];
 				const nextClip = track.clips[index + 1];
-				const minStartBoundSec = prevClip
-					? prevClip.startSec + prevClip.durationSec
-					: 0;
-				const maxEndBoundSec = nextClip ? nextClip.startSec : durationSec;
+				// How far each edge may EXTEND back out, from the source-trim
+				// state (the "un-trim after split" fix): trimmed-off source
+				// material, converted to timeline seconds through the retime
+				// rate. Elements with no finite source (text/image/sticker)
+				// extend without limit.
+				const rate = clip.retimeRate ?? 1;
+				const hasFiniteSource = clip.sourceDurationSec != null;
+				const startExtensionSec = hasFiniteSource
+					? (clip.trimStartSec ?? 0) / rate
+					: Number.POSITIVE_INFINITY;
+				const endExtensionSec = hasFiniteSource
+					? (clip.trimEndSec ?? 0) / rate
+					: Number.POSITIVE_INFINITY;
+				const sourceMinStartSec = clip.startSec - startExtensionSec;
+				const sourceMaxEndSec =
+					clip.startSec + clip.durationSec + endExtensionSec;
+				// Main track is MAGNETIC (CapCut): trims may cross neighbors —
+				// the commit ripples every later clip to stay butted — so only
+				// the source extent bounds the drag. Free-position tracks
+				// (audio/overlay/text) still stop at their neighbors, and are
+				// no longer capped at the current project duration (extending
+				// the LAST clip grows the project; the old `durationSec` cap
+				// made the last clip's end handle immovable).
+				const isMainTrack = track.kind === "main";
+				const minStartBoundSec = isMainTrack
+					? sourceMinStartSec
+					: Math.max(
+							prevClip ? prevClip.startSec + prevClip.durationSec : 0,
+							sourceMinStartSec,
+						);
+				const maxEndBoundSec = isMainTrack
+					? sourceMaxEndSec
+					: Math.min(
+							nextClip ? nextClip.startSec : Number.POSITIVE_INFINITY,
+							sourceMaxEndSec,
+						);
 
 				const hasPreview = trimPreview?.clipId === clip.id;
 				let effectiveStartSec = clip.startSec;
@@ -89,6 +142,9 @@ export function TimelineTrackRow({
 						);
 					}
 				}
+				if (movePreview?.clipId === clip.id) {
+					effectiveStartSec = movePreview.startSec;
+				}
 
 				return (
 					<TimelineClip
@@ -103,6 +159,8 @@ export function TimelineTrackRow({
 						onSelect={onSelectClip}
 						onTrimPreview={onTrimPreview}
 						onTrimCommit={onTrimCommit}
+						onMovePreview={onMovePreview}
+						onMoveEnd={onMoveEnd}
 						minStartBoundSec={minStartBoundSec}
 						maxEndBoundSec={maxEndBoundSec}
 						snapTargets={snapTargets}

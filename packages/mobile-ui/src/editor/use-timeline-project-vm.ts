@@ -134,6 +134,18 @@ function mapTrack({ track, isMain }: { track: TimelineTrack; isMain: boolean }):
 		startSec: mediaTimeToSeconds({ time: element.startTime }),
 		durationSec: mediaTimeToSeconds({ time: element.duration }),
 		colorHue: colorHueForId(element.id),
+		// Trim/source state for the handle-extension bounds (see the VM
+		// type's own doc comment). sourceDuration is only meaningful on
+		// media-backed elements; text/sticker/image leave it undefined and
+		// extend freely.
+		trimStartSec: mediaTimeToSeconds({ time: element.trimStart }),
+		trimEndSec: mediaTimeToSeconds({ time: element.trimEnd }),
+		sourceDurationSec:
+			element.sourceDuration != null && (element.type === "video" || element.type === "audio")
+				? mediaTimeToSeconds({ time: element.sourceDuration })
+				: undefined,
+		retimeRate:
+			"retime" in element && element.retime ? element.retime.rate : undefined,
 	}));
 	return {
 		id: track.id,
