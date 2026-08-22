@@ -27,7 +27,9 @@ describe("resolveCaptionStyle", () => {
 		const style = resolveCaptionStyle({ element: buildElement() });
 		expect(style.position).toBe("bottom");
 		expect(style.fontWeight).toBe("bold");
-		expect(style.animationStyle).toBe("karaoke");
+		// Round 27 (founder): the spoken-word highlight is OFF by default —
+		// the "Highlight spoken word" toggle / karaoke presets opt in.
+		expect(style.animationStyle).toBe("none");
 	});
 
 	test("falls back safely when a param is missing or malformed (e.g. a stale/hand-edited document)", () => {

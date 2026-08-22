@@ -32,7 +32,9 @@
 		"./sounds/local-sounds": "./src/sounds/local-sounds.ts",
 		"./export": "./src/export/index.ts",
 		"./selection": "./src/selection/editor-selection.ts",
-		"./*": "./src/*"
+		"./*": "./src/*",
+		"./media/waveform-summary": "./src/media/waveform-summary.ts",
+		"./services/waveform-cache": "./src/services/waveform-cache/service.ts"
 	},
 	"scripts": {
 		"check-types": "tsc --project tsconfig.json --noEmit",

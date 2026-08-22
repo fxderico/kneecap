@@ -33,7 +33,12 @@ interface TimelineClipProps {
 	viewEndSec: number;
 	isSelected: boolean;
 	onSelect: (params: { clipId: string }) => void;
-	onTrimPreview: (params: { clipId: string; edge: TrimEdge; boundarySec: number }) => void;
+	onTrimPreview: (params: {
+		clipId: string;
+		trackId: string;
+		edge: TrimEdge;
+		boundarySec: number;
+	}) => void;
 	onTrimCommit: (params: {
 		clipId: string;
 		trackId: string;
@@ -328,7 +333,12 @@ export function TimelineClip({
 			if (target && !drag.wasSnapped) hapticTick();
 			drag.wasSnapped = target !== null;
 
-			onTrimPreview({ clipId: clip.id, edge: drag.edge, boundarySec: snappedSec });
+			onTrimPreview({
+				clipId: clip.id,
+				trackId: clip.trackId,
+				edge: drag.edge,
+				boundarySec: snappedSec,
+			});
 		},
 		[
 			clip.id,

@@ -41,12 +41,20 @@
  * `useMemo` keyed on those stable references instead, so the mapping only
  * re-runs when something real changed.
  */
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { useEditor } from "@kneecap/editor-core/react";
 import { mediaTimeToSeconds } from "@kneecap/editor-core/wasm";
 import { calculateTotalDuration } from "@kneecap/editor-core/timeline";
 import type { SceneTracks, TimelineElement, TimelineTrack } from "@kneecap/editor-core/timeline";
+import type { MediaAsset } from "@kneecap/editor-core";
+import { sampleSourceWaveformSummary } from "@kneecap/editor-core/media/waveform-summary";
 import type { FrameRate } from "opencut-wasm";
+import {
+	getWaveformsVersion,
+	getWaveformSummary,
+	kickWaveform,
+	subscribeWaveforms,
+} from "./waveform-peaks";
 import type {
 	TimelineClipKind,
 	TimelineClipVM,
@@ -125,7 +133,53 @@ function trackKindFor({ track, isMain }: { track: TimelineTrack; isMain: boolean
 	}
 }
 
-function mapTrack({ track, isMain }: { track: TimelineTrack; isMain: boolean }): TimelineTrackVM {
+/** Real amplitude peaks for an AUDIO clip's visible (trimmed, retimed)
+ *  source window, from the shared waveform cache. Null until the async
+ *  decode lands (kicked here; `useTimelineProjectVM` re-runs on arrival
+ *  via the waveform version store) or when the source can't decode. */
+function audioClipPeaks({
+	element,
+	asset,
+}: {
+	element: TimelineElement;
+	asset: MediaAsset | undefined;
+}): number[] | undefined {
+	if (!asset) return undefined;
+	kickWaveform({ assetId: asset.id, file: asset.file, url: asset.url });
+	const summary = getWaveformSummary(asset.id);
+	if (!summary) return undefined;
+
+	const rate =
+		"retime" in element && element.retime ? element.retime.rate : 1;
+	const trimStartSec = mediaTimeToSeconds({ time: element.trimStart });
+	const durationSec = mediaTimeToSeconds({ time: element.duration });
+	const windowSec = durationSec * rate;
+	const startSample = Math.max(0, trimStartSec * summary.sampleRate);
+	const endSample = Math.min(
+		summary.totalSamples,
+		startSample + windowSec * summary.sampleRate,
+	);
+	if (endSample <= startSample) return undefined;
+	const bucketCount = Math.min(400, Math.max(16, Math.round(durationSec * 20)));
+	const span = (endSample - startSample) / bucketCount;
+	return sampleSourceWaveformSummary({
+		summary,
+		buckets: Array.from({ length: bucketCount }, (_, i) => ({
+			bucketStart: startSample + i * span,
+			bucketEnd: startSample + (i + 1) * span,
+		})),
+	});
+}
+
+function mapTrack({
+	track,
+	isMain,
+	assetById,
+}: {
+	track: TimelineTrack;
+	isMain: boolean;
+	assetById: Map<string, MediaAsset>;
+}): TimelineTrackVM {
 	const clips: TimelineClipVM[] = track.elements.map((element) => ({
 		id: element.id,
 		trackId: track.id,
@@ -146,6 +200,10 @@ function mapTrack({ track, isMain }: { track: TimelineTrack; isMain: boolean }):
 				: undefined,
 		retimeRate:
 			"retime" in element && element.retime ? element.retime.rate : undefined,
+		waveformPeaks:
+			element.type === "audio" && "mediaId" in element
+				? audioClipPeaks({ element, asset: assetById.get(element.mediaId) })
+				: undefined,
 	}));
 	return {
 		id: track.id,
@@ -169,14 +227,23 @@ export function useTimelineProjectVM(): TimelineProjectVM | null {
 	const fps = useEditor(
 		(editor): FrameRate | null => editor.project.getActiveOrNull()?.settings.fps ?? null,
 	);
+	const mediaAssets = useEditor((editor) => editor.media.getAssets());
+	// Bumps when an async waveform decode lands, re-running the mapping so
+	// audio clips pick up their real peaks (see waveform-peaks.ts).
+	const waveformsVersion = useSyncExternalStore(
+		subscribeWaveforms,
+		getWaveformsVersion,
+		getWaveformsVersion,
+	);
 
 	return useMemo(() => {
 		if (!tracks || !fps) return null;
 
+		const assetById = new Map(mediaAssets.map((asset) => [asset.id, asset]));
 		const trackVMs: TimelineTrackVM[] = [
-			mapTrack({ track: tracks.main, isMain: true }),
-			...tracks.overlay.map((track) => mapTrack({ track, isMain: false })),
-			...tracks.audio.map((track) => mapTrack({ track, isMain: false })),
+			mapTrack({ track: tracks.main, isMain: true, assetById }),
+			...tracks.overlay.map((track) => mapTrack({ track, isMain: false, assetById })),
+			...tracks.audio.map((track) => mapTrack({ track, isMain: false, assetById })),
 		];
 
 		return {
@@ -184,5 +251,5 @@ export function useTimelineProjectVM(): TimelineProjectVM | null {
 			durationSec: mediaTimeToSeconds({ time: calculateTotalDuration({ tracks }) }),
 			fps: frameRateToFloatInline(fps),
 		};
-	}, [tracks, fps]);
+	}, [tracks, fps, mediaAssets, waveformsVersion]);
 }

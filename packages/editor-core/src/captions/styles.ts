@@ -50,6 +50,11 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		// black outline, GOLD active word, bottom, sentence case, karaoke.
 		// fontSize 24 → 18 in round 23 (founder: "captions should be sized
 		// a little smaller by default") — pinch-to-scale covers the rest.
+		// animationStyle karaoke → none in round 27 (founder: "i don't like
+		// the way it highlights which word im saying — make that optional,
+		// default off"): the DEFAULT preset ships without the spoken-word
+		// highlight; the "Highlight spoken word" toggle in the captions
+		// edit view (and the explicitly-karaoke presets) turn it on.
 		params: {
 			fontFamily: "Arial",
 			fontSize: 18,
@@ -64,7 +69,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 			"activeWordBackground.color": "#FFD700",
 			position: "bottom" satisfies CaptionPosition,
 			uppercase: false,
-			animationStyle: "karaoke" satisfies CaptionAnimationStyle,
+			animationStyle: "none" satisfies CaptionAnimationStyle,
 		},
 	},
 	{

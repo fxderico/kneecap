@@ -39,6 +39,7 @@ import {
 	subMediaTime,
 	maxMediaTime,
 	mediaTime,
+	mediaTimeToSeconds,
 	roundFrameTicks,
 } from "@kneecap/editor-core/wasm";
 import { registerDefaultGraphics } from "@kneecap/editor-core/graphics";
@@ -190,11 +191,75 @@ export function commitElementTrim({
 	edge: "start" | "end";
 	boundarySec: number;
 }): void {
+	// A trim drag scrubs through the engine's preview overlay
+	// (scrubElementTrim) — the commit replaces it with the real command.
+	editor.timeline.discardPreview();
+	const result = computeTrimPatches({ editor, trackId, elementId, edge, boundarySec });
+	if (!result || result.patches.length === 0) return;
+	editor.command.execute({
+		command: new UpdateElementsCommand({ updates: result.patches }),
+	});
+}
+
+/**
+ * Live trim scrub (round 27, founder: "the preview area should reflect
+ * the frame that I'm trimming to"): every trim-preview tick pushes the
+ * SAME patches the commit would make into the engine's preview overlay
+ * (so the renderer composes the post-trim timeline — including the
+ * main-track ripple, so nothing overlaps) and seeks to just inside the
+ * dragged edge. The timeline STRIP keeps its own local preview; only the
+ * renderer consumes the overlay (getRenderTracks).
+ */
+export function scrubElementTrim({
+	editor,
+	trackId,
+	elementId,
+	edge,
+	boundarySec,
+}: {
+	editor: EditorCore;
+	trackId: string;
+	elementId: string;
+	edge: "start" | "end";
+	boundarySec: number;
+}): void {
+	const result = computeTrimPatches({ editor, trackId, elementId, edge, boundarySec });
+	if (!result) return;
+	if (result.patches.length > 0) {
+		editor.timeline.previewElements({
+			updates: result.patches.map((p) => ({
+				trackId: p.trackId,
+				elementId: p.elementId,
+				updates: p.patch,
+			})),
+		});
+	}
+	seekToSeconds({ editor, seconds: result.seekSec });
+}
+
+function computeTrimPatches({
+	editor,
+	trackId,
+	elementId,
+	edge,
+	boundarySec,
+}: {
+	editor: EditorCore;
+	trackId: string;
+	elementId: string;
+	edge: "start" | "end";
+	boundarySec: number;
+}): {
+	patches: Array<{ trackId: string; elementId: string; patch: Partial<TimelineElement> }>;
+	/** Where the preview should sit to show the frame under the dragged
+	 *  edge: one frame inside the (post-trim) clip. */
+	seekSec: number;
+} | null {
 	const tracks = editor.scenes.getActiveScene().tracks;
 	const track = findTrackInSceneTracks({ tracks, trackId });
 	const element = track?.elements.find((el) => el.id === elementId);
 	const fps = editor.project.getActive().settings.fps;
-	if (!track || !element) return;
+	if (!track || !element) return null;
 
 	const isMainTrack = tracks.main.id === trackId;
 	const side = edge === "start" ? ("left" as const) : ("right" as const);
@@ -258,7 +323,18 @@ export function commitElementTrim({
 		deltaTime,
 		fps,
 	});
-	if (updates.length === 0 || applied === 0) return;
+	const frameSec = fps.denominator / fps.numerator;
+	if (updates.length === 0 || applied === 0) {
+		// No-op delta: still a valid scrub target — the frame just inside
+		// the CURRENT edge.
+		const startSec = mediaTimeToSeconds({ time: element.startTime });
+		const endSec = mediaTimeToSeconds({ time: originalEnd });
+		return {
+			patches: [],
+			seekSec:
+				side === "right" ? Math.max(startSec, endSec - frameSec) : startSec,
+		};
+	}
 
 	const patches: Array<{
 		trackId: string;
@@ -298,7 +374,21 @@ export function commitElementTrim({
 		}
 	}
 
-	editor.command.execute({ command: new UpdateElementsCommand({ updates: patches }) });
+	// Scrub target: one frame inside the post-trim clip at the dragged
+	// edge. patches[0] always carries all four resize fields (main-left
+	// pins startTime back to the original).
+	const patched = patches[0].patch;
+	const newStartSec = mediaTimeToSeconds({
+		time: patched.startTime ?? element.startTime,
+	});
+	const newEndSec =
+		newStartSec + mediaTimeToSeconds({ time: patched.duration ?? element.duration });
+	const seekSec =
+		side === "right"
+			? Math.max(newStartSec, newEndSec - frameSec)
+			: newStartSec;
+
+	return { patches, seekSec };
 }
 
 /**

@@ -79,14 +79,30 @@ export function EditPanel({
 						active={maintainPitch}
 						onToggle={() => onSetSpeed({ rate, maintainPitch: !maintainPitch })}
 					/>
+					{/* CapCut-parity volume: a LINEAR percent slider 0–1000
+					    (100 = original, 1000 = 10×) — the raw dB slider
+					    crammed the whole audible boost into its top edge and
+					    read as "won't go loud enough" (founder, 2026-08-22).
+					    Storage stays dB engine-wide: pct↔dB converts at this
+					    UI boundary only. 0% pins to VOLUME_DB_MIN (silence);
+					    1000% is exactly VOLUME_DB_MAX (+20 dB = 10×). */}
 					<ParamRow
 						label="Volume"
-						value={volumeDb}
-						min={VOLUME_DB_MIN}
-						max={VOLUME_DB_MAX}
-						step={0.5}
-						formatValue={(v) => `${v.toFixed(1)} dB`}
-						onChange={onSetVolume}
+						value={Math.round(10 ** (volumeDb / 20) * 100)}
+						min={0}
+						max={1000}
+						step={1}
+						formatValue={(v) => `${Math.round(v)}`}
+						onChange={(pct) =>
+							onSetVolume(
+								pct <= 0
+									? VOLUME_DB_MIN
+									: Math.min(
+											VOLUME_DB_MAX,
+											Math.max(VOLUME_DB_MIN, 20 * Math.log10(pct / 100)),
+										),
+							)
+						}
 					/>
 					<ToggleRow
 						label="Reverse"

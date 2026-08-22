@@ -78,6 +78,8 @@ final class NativeAudioPreview {
 				continue
 			}
 
+			if clip.volume <= 0.001 { continue }
+
 			let player = AVAudioPlayerNode()
 			engine.attach(player)
 
@@ -89,8 +91,20 @@ final class NativeAudioPreview {
 				engine.connect(player, to: timePitch, format: file.processingFormat)
 				lastNode = timePitch
 			}
+			// Gain staging (round 27, CapCut-parity 0–1000% volume): the old
+			// `player.volume = min(2, v)` clamp capped boosts at 2×, and
+			// AVAudioPlayerNode.volume is a 0–1 mixer input level anyway —
+			// it can never AMPLIFY. Boost/cut rides an EQ's globalGain in dB
+			// instead (±24 dB covers the UI's full 10× = +20 dB range).
+			if abs(clip.volume - 1.0) > 0.001 {
+				let gain = AVAudioUnitEQ(numberOfBands: 0)
+				gain.globalGain = Float(max(-96.0, min(24.0, 20.0 * log10(clip.volume))))
+				engine.attach(gain)
+				engine.connect(lastNode, to: gain, format: file.processingFormat)
+				lastNode = gain
+			}
 			engine.connect(lastNode, to: engine.mainMixerNode, format: file.processingFormat)
-			player.volume = Float(max(0, min(2, clip.volume)))
+			player.volume = 1
 
 			scheduled.append((player, file, clip, playOffsetInClip))
 			players.append(player)

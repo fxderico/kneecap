@@ -60,14 +60,20 @@ export class WaveformCache {
 		}
 
 		let arrayBuffer: ArrayBuffer | null = null;
-		if (sourceFile) {
+		if (sourceFile && sourceFile.size > 0) {
 			arrayBuffer = await sourceFile.arrayBuffer();
 		} else if (audioUrl) {
+			// NOT gated on response.ok: Capacitor iOS serves media as a
+			// statusless URLResponse (status 0, ok=false, bytes fine) — the
+			// same trap readPlayableBytes documents. Empty bytes are the
+			// real failure signal.
 			const response = await fetch(audioUrl);
-			if (!response.ok) {
-				throw new Error(`Failed to fetch waveform source: ${response.status}`);
-			}
 			arrayBuffer = await response.arrayBuffer();
+			if (arrayBuffer.byteLength === 0) {
+				throw new Error(
+					`Failed to fetch waveform source (status ${response.status}, 0 bytes)`,
+				);
+			}
 		}
 
 		if (!arrayBuffer) {

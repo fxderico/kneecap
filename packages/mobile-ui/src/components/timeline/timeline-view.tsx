@@ -129,6 +129,15 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		edge: TrimEdge;
 		boundarySec: number;
 	}) => void;
+	/** Fired on EVERY trim-preview tick so the shell can scrub the preview
+	 *  to the frame under the dragged edge (engine preview overlay + seek;
+	 *  see scrubElementTrim). Same params as onTrimClip. */
+	onTrimScrub?: (params: {
+		clipId: string;
+		trackId: string;
+		edge: TrimEdge;
+		boundarySec: number;
+	}) => void;
 	/** ENGINE-BACKED move commit: fired once per finished clip-body drag
 	 *  with the snapped/clamped start time the preview last showed. */
 	onMoveClip?: (params: {
@@ -164,6 +173,7 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 		transitions: transitionsProp,
 		onTransitionCommit,
 		onTrimClip,
+		onTrimScrub,
 		onMoveClip,
 		onReorderMainTrack,
 	},
@@ -352,14 +362,22 @@ export const TimelineView = forwardRef<TimelineViewHandle, {
 	const snapThresholdSec = pixelsToTime({ px: SNAP_THRESHOLD_PX, pixelsPerSecond });
 
 	const handleTrimPreview = useCallback(
-		(params: { clipId: string; edge: TrimEdge; boundarySec: number }) => {
+		(params: {
+			clipId: string;
+			trackId: string;
+			edge: TrimEdge;
+			boundarySec: number;
+		}) => {
 			setTrimPreview(params);
 			const target = snapTargets.find(
 				(t) => Math.abs(t.timeSec - params.boundarySec) < 1e-6,
 			);
 			setSnapIndicatorSec(target ? target.timeSec : null);
+			// Live scrub: the shell seeks the PREVIEW to the frame under the
+			// dragged edge (CapCut behavior — you see what you're cutting to).
+			onTrimScrub?.(params);
 		},
-		[snapTargets],
+		[snapTargets, onTrimScrub],
 	);
 
 	const handleTrimCommit = useCallback(

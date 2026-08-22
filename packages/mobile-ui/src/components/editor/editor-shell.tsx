@@ -47,6 +47,7 @@ import {
 	setProjectResolution,
 	setProjectBackground,
 	commitElementTrim,
+	scrubElementTrim,
 	commitElementMove,
 	commitMainTrackReorder,
 } from "../../editor/actions";
@@ -264,6 +265,9 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						onClearSelection={() => selectElement({ editor, ref: null })}
 						onTrimClip={({ clipId, trackId, edge, boundarySec }) =>
 							commitElementTrim({ editor, trackId, elementId: clipId, edge, boundarySec })
+						}
+						onTrimScrub={({ clipId, trackId, edge, boundarySec }) =>
+							scrubElementTrim({ editor, trackId, elementId: clipId, edge, boundarySec })
 						}
 						onMoveClip={({ clipId, trackId, startSec }) =>
 							commitElementMove({ editor, trackId, elementId: clipId, startSec })

@@ -70,7 +70,12 @@ export function TimelineTrackRow({
 	selectedClipId: string | null;
 	onSelectClip: (params: { clipId: string }) => void;
 	trimPreview: TrimPreview | null;
-	onTrimPreview: (params: { clipId: string; edge: TrimEdge; boundarySec: number }) => void;
+	onTrimPreview: (params: {
+		clipId: string;
+		trackId: string;
+		edge: TrimEdge;
+		boundarySec: number;
+	}) => void;
 	onTrimCommit: (params: {
 		clipId: string;
 		trackId: string;
