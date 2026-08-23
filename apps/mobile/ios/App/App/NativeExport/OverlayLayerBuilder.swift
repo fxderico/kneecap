@@ -69,17 +69,19 @@ public enum OverlayLayerBuilder {
 		zIndex: Int
 	) -> OverlayBillboard? {
 		guard let content = clip.params["content"]?.asString, !content.isEmpty else { return nil }
-		// Raw point size, same as the CATextLayer path used (text sizes are
-		// authored against the canvas; captions are the height-scaled ones).
-		let fontSize = CGFloat(clip.params["fontSize"]?.asDouble ?? 48)
+		// HEIGHT-SCALED, exactly like the preview and like captions (round 33):
+		// `text/primitives.ts` renders text at `fontSize × canvasHeight / 90`,
+		// so drawing the raw param here made every exported text overlay ~21×
+		// too small at 1080×1920 — the founder's title shrank to a speck while
+		// the preview showed it full size. The old "text is authored against
+		// the canvas" comment was simply wrong.
+		let authoredFontSize = CGFloat(clip.params["fontSize"]?.asDouble ?? 48)
+		let fontSize = authoredFontSize * (renderSize.height / fontSizeScaleReference)
 		let color = cgColor(fromHex: clip.params["color"]?.asString ?? "#FFFFFF")
 		let bold = (clip.params["fontWeight"]?.asString ?? "normal") == "bold"
 		let font = resolveFont(family: clip.params["fontFamily"]?.asString ?? "Albert Sans", bold: bold, size: fontSize)
 
-		// Text border (round 31): same font-relative strokeWidth semantics
-		// as captions — here the CTFont size IS the raw param fontSize, so
-		// the value passes through unscaled and rasterizeLine's
-		// px→percent conversion yields strokeWidth/fontSize directly.
+		// Text border: a PERCENT of font size (round 33), same as captions.
 		let textStrokeWidth = CGFloat(clip.params["strokeWidth"]?.asDouble ?? 0)
 		let textStrokeColor = cgColor(fromHex: clip.params["strokeColor"]?.asString ?? "#000000")
 
@@ -92,7 +94,7 @@ public enum OverlayLayerBuilder {
 			totalWidth: width,
 			totalHeight: height,
 			strokeColor: textStrokeWidth > 0 ? textStrokeColor : nil,
-			strokeWidth: textStrokeWidth,
+			strokePercent: textStrokeWidth,
 			background: nil,
 			activePill: nil
 		) else { return nil }
@@ -190,11 +192,10 @@ public enum OverlayLayerBuilder {
 				scaledFontSize: scaledFontSize,
 				totalWidth: totalWidth,
 				totalHeight: totalHeight,
-				// strokeWidth is FONT-relative (round 31) — scale to the
-				// rasterized font so rasterizeLine's px→percent conversion
-				// yields strokeWidth/fontSize, matching the preview exactly.
+				// strokeWidth is a PERCENT of font size (round 33) — same unit
+				// kCTStrokeWidth wants, and the same the preview divides by 100.
 				strokeColor: style.strokeWidth > 0 ? style.strokeColor : nil,
-				strokeWidth: style.strokeWidth * (scaledFontSize / max(style.fontSize, 1)),
+				strokePercent: style.strokeWidth,
 				background: style.backgroundEnabled
 					? RasterPill(centerX: totalWidth / 2, width: totalWidth + scaledFontSize * 0.8, height: totalHeight + scaledFontSize * 0.5, color: style.backgroundColor)
 					: nil,
@@ -335,7 +336,7 @@ public enum OverlayLayerBuilder {
 		totalWidth: CGFloat,
 		totalHeight: CGFloat,
 		strokeColor: CGColor?,
-		strokeWidth: CGFloat,
+		strokePercent: CGFloat,
 		background: RasterPill?,
 		activePill: RasterPill?
 	) -> CGImage? {
@@ -386,13 +387,14 @@ public enum OverlayLayerBuilder {
 				NSAttributedString.Key(kCTFontAttributeName as String): font,
 				NSAttributedString.Key(kCTForegroundColorAttributeName as String): word.fill,
 			]
-			if let strokeColor, strokeWidth > 0 {
+			if let strokeColor, strokePercent > 0 {
 				// Negative kCTStrokeWidth = stroke AND fill; magnitude is a
-				// PERCENTAGE of the font size (the canvas renderer's
-				// `lineWidth` is raw pixels — converted here).
+				// PERCENTAGE of the font size — which is exactly the unit the
+				// `strokeWidth` param carries (round 33), so it passes straight
+				// through. The preview's canvas `lineWidth` is derived from the
+				// same percentage, so the two agree by construction.
 				attributes[NSAttributedString.Key(kCTStrokeColorAttributeName as String)] = strokeColor
-				attributes[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] =
-					-Double(strokeWidth / scaledFontSize * 100)
+				attributes[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] = -Double(strokePercent)
 			}
 			let line = CTLineCreateWithAttributedString(
 				NSAttributedString(string: word.text, attributes: attributes)

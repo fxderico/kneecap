@@ -128,14 +128,12 @@ export function renderCaptionToContext({
 
 		if (style.strokeWidth > 0) {
 			ctx.strokeStyle = style.strokeColor;
-			// FONT-relative width (round 31): the raw-px lineWidth rendered
-			// near-hairline once the font scaled up with the canvas
-			// (scaledFontSize = fontSize × canvasHeight/90 while lineWidth
-			// stayed raw). Scaling by the same factor keeps the border's
-			// weight proportional to the glyphs everywhere — and matches the
-			// export's kCTStrokeWidth percentage math.
-			ctx.lineWidth =
-				style.strokeWidth * (line.scaledFontSize / Math.max(style.fontSize, 1));
+			// strokeWidth is a PERCENT of the font size (round 33) — the same
+			// unit CoreText's kCTStrokeWidth uses in the export, so the two
+			// agree by construction at any canvas size. Round 31 briefly
+			// scaled by scaledFontSize/fontSize instead, which turned a
+			// preset's `6` into 33% of the font and buried captions in black.
+			ctx.lineWidth = (style.strokeWidth / 100) * line.scaledFontSize;
 			ctx.lineJoin = "round";
 			ctx.strokeText(word.text, wordX, 0);
 		}

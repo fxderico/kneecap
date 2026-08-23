@@ -54,17 +54,15 @@ export function renderTextToContext({
 	}
 
 	if (resolved.strokeWidth > 0) {
-		// Border under the fill (CapCut's stroke+fill model). strokeWidth is
-		// font-relative: scale to the layout's rendered font size so the
-		// ratio holds at every canvas size.
+		// Border under the fill (CapCut's stroke+fill model). strokeWidth is a
+		// PERCENT of the font size — the unit CoreText's kCTStrokeWidth uses
+		// in the export, so preview and export agree at any canvas size.
 		const layout = resolved.measuredText;
-		const fontSize = layout.fontSizeRatio * 15; // fontSizeRatio = fontSize/15
 		strokeMeasuredTextLayout({
 			ctx,
 			layout,
 			strokeColor: resolved.strokeColor,
-			strokeWidth:
-				resolved.strokeWidth * (layout.scaledFontSize / Math.max(fontSize, 1)),
+			strokeWidth: (resolved.strokeWidth / 100) * layout.scaledFontSize,
 			textBaseline: baseline,
 		});
 	}

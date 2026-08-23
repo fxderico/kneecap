@@ -48,7 +48,7 @@ import {
 	type NativeMediaHandle,
 	type NativeMediaSource,
 } from "@kneecap/editor-core";
-import { buildElementFromMedia } from "@kneecap/editor-core/timeline";
+import { buildElementFromMedia, buildTextElement } from "@kneecap/editor-core/timeline";
 import { InsertElementCommand } from "@kneecap/editor-core/commands";
 import { loadFontAtlas } from "@kneecap/editor-core/fonts/local-fonts";
 import { EditorShell, ensurePreviewGpu } from "@kneecap/mobile-ui";
@@ -256,6 +256,34 @@ async function runPhase({
 		});
 		if (isVisual) mainCursorSec += durationSec;
 	}
+	// A TEXT overlay with KNOWN params, for the round-33 golden-frame check
+	// (founder: exported text "shrank to fuck" vs the preview, captions'
+	// borders "out of control"). fontSize 15 must render at
+	// 15 × canvasHeight/90 = 120px on a 720-tall canvas, and the 2%-of-font
+	// border at ~2.4px total. The runner measures both off a real exported
+	// frame with ffmpeg.
+	editor.command.execute({
+		command: new InsertElementCommand({
+			element: buildTextElement({
+				raw: {
+					name: "autotest-text",
+					duration: mediaTimeFromSeconds({ seconds: 4 }),
+					params: {
+						content: "HH",
+						fontSize: 15,
+						color: "#ffffff",
+						strokeColor: "#000000",
+						strokeWidth: 2,
+						fontWeight: "bold",
+					},
+				},
+				startTime: mediaTimeFromSeconds({ seconds: 0 }),
+			}),
+			placement: { mode: "newTrack", trackType: "text" },
+		}),
+	});
+	log("text overlay placed (fontSize 15, border 2%)");
+
 	log("clips placed on timeline");
 	await editor.project.saveCurrentProject();
 	log("project saved");
@@ -448,6 +476,36 @@ async function driveAndSample({
 		: audio.contextState === "running" &&
 			audio.failedSinks === 0 &&
 			audio.activeSinks + audio.decodedBuffers > 0;
+	// CAPTIONS (round 30): whole-timeline transcription. The planted VIDEO's
+	// audio is a pure sine tone (no speech); the planted AUDIO-track clip is
+	// real synthesized SPEECH — so any caption appearing at all proves the
+	// generator processed beyond the main track's first clip (the old
+	// single-clip behavior returned "No speech was detected" on exactly this
+	// timeline shape — the founder's screenshot, 2026-08-23). Runs the REAL
+	// on-device recognizer (iOS 26 SpeechAnalyzer / SFSpeech fallback).
+	let captionsOk = false;
+	let captionsDetail = "not-run";
+	try {
+		const { generateCaptions, getAllCaptions } = await import("@kneecap/mobile-ui");
+		const timeoutMs = 240_000; // first run may download a locale model
+		const result = await Promise.race([
+			generateCaptions({ editor, stylePresetId: "simple" }),
+			new Promise<never>((_, reject) =>
+				setTimeout(() => reject(new Error(`captions timed out after ${timeoutMs}ms`)), timeoutMs),
+			),
+		]);
+		const captions = getAllCaptions({ editor });
+		const words = captions
+			.flatMap(({ element }) => element.words.map((w) => w.text))
+			.join(" ");
+		captionsOk = result !== null && captions.length > 0;
+		captionsDetail = captionsOk
+			? `ok(${captions.length} pages, "${words.slice(0, 60)}")`
+			: "generated null / zero captions";
+	} catch (error) {
+		captionsDetail = error instanceof Error ? error.message : String(error);
+	}
+
 	// EXPORT: build the real EDL with the native asset resolver, drive the
 	// native exporter, then verify the output file has bytes AND a decodable
 	// video track — the founder-device failure was "asset could not be
@@ -522,36 +580,6 @@ async function driveAndSample({
 		exportDetail = `${Math.round(bytes.byteLength / 1024)}KB`;
 	} catch (error) {
 		exportDetail = error instanceof Error ? error.message : String(error);
-	}
-
-	// CAPTIONS (round 30): whole-timeline transcription. The planted VIDEO's
-	// audio is a pure sine tone (no speech); the planted AUDIO-track clip is
-	// real synthesized SPEECH — so any caption appearing at all proves the
-	// generator processed beyond the main track's first clip (the old
-	// single-clip behavior returned "No speech was detected" on exactly this
-	// timeline shape — the founder's screenshot, 2026-08-23). Runs the REAL
-	// on-device recognizer (iOS 26 SpeechAnalyzer / SFSpeech fallback).
-	let captionsOk = false;
-	let captionsDetail = "not-run";
-	try {
-		const { generateCaptions, getAllCaptions } = await import("@kneecap/mobile-ui");
-		const timeoutMs = 240_000; // first run may download a locale model
-		const result = await Promise.race([
-			generateCaptions({ editor, stylePresetId: "simple" }),
-			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error(`captions timed out after ${timeoutMs}ms`)), timeoutMs),
-			),
-		]);
-		const captions = getAllCaptions({ editor });
-		const words = captions
-			.flatMap(({ element }) => element.words.map((w) => w.text))
-			.join(" ");
-		captionsOk = result !== null && captions.length > 0;
-		captionsDetail = captionsOk
-			? `ok(${captions.length} pages, "${words.slice(0, 60)}")`
-			: "generated null / zero captions";
-	} catch (error) {
-		captionsDetail = error instanceof Error ? error.message : String(error);
 	}
 
 	const timelineOk = scroll0 >= 0 && scroll1 > scroll0;

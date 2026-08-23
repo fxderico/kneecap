@@ -233,16 +233,17 @@ const textElementParams: ElementParamDefinition[] = [
 		default: "#000000",
 	},
 	{
-		// FONT-SIZE units, not raw canvas px (round 31): the rendered line
-		// width scales with the font (`lineWidth = strokeWidth *
-		// scaledFontSize / fontSize`), so the same value reads identically
-		// at every canvas size. CapCut's default border measures 20% of
-		// the font size (captured + pixel-measured on capcut.com).
+		// PERCENT OF FONT SIZE (round 33) — the unit CoreText's
+		// kCTStrokeWidth uses, so preview (`lineWidth = strokeWidth/100 ×
+		// scaledFontSize`) and export agree at any canvas size. 20 ≈
+		// CapCut's own default-when-enabled; 2 is the thin default this
+		// app's Border toggle applies (see DEFAULT_TEXT_BORDER_WIDTH).
 		key: "strokeWidth",
 		label: "Border",
 		type: "number",
 		default: 0,
 		min: 0,
+		max: 25,
 		step: 0.5,
 	},
 	{
