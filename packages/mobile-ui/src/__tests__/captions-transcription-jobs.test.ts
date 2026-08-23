@@ -1,6 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { registerNativeMediaPathResolver } from "@kneecap/editor-core";
 import { __resetNativeMediaPathResolverForTests } from "@kneecap/editor-core/media/native-paths";
+import type { MediaAsset } from "@kneecap/editor-core";
+import type { SceneTracks } from "@kneecap/editor-core/timeline";
 import { collectTranscriptionJobs } from "../editor/captions-actions";
 
 /**
@@ -14,7 +16,7 @@ import { collectTranscriptionJobs } from "../editor/captions-actions";
 
 const TICKS = 120_000; // ticks per second (test-local constant)
 
-function asset(id: string, rel: string, duration = 10) {
+function asset({ id, rel, duration = 10 }: { id: string; rel: string; duration?: number }): MediaAsset {
 	return {
 		id,
 		name: `${id}.mp4`,
@@ -22,16 +24,22 @@ function asset(id: string, rel: string, duration = 10) {
 		file: new File([], `${id}.mp4`),
 		duration,
 		nativeRelativePath: rel,
-	} as never;
+	};
 }
 
-function videoEl(
-	id: string,
-	mediaId: string,
-	startSec: number,
-	durSec: number,
-	extra: Record<string, unknown> = {},
-) {
+function videoEl({
+	id,
+	mediaId,
+	startSec,
+	durSec,
+	extra = {},
+}: {
+	id: string;
+	mediaId: string;
+	startSec: number;
+	durSec: number;
+	extra?: Record<string, unknown>;
+}) {
 	return {
 		id,
 		type: "video",
@@ -43,10 +51,20 @@ function videoEl(
 		trimEnd: 0,
 		params: {},
 		...extra,
-	} as never;
+	};
 }
 
-function audioEl(id: string, mediaId: string, startSec: number, durSec: number) {
+function audioEl({
+	id,
+	mediaId,
+	startSec,
+	durSec,
+}: {
+	id: string;
+	mediaId: string;
+	startSec: number;
+	durSec: number;
+}) {
 	return {
 		id,
 		type: "audio",
@@ -58,7 +76,7 @@ function audioEl(id: string, mediaId: string, startSec: number, durSec: number) 
 		trimStart: 2 * TICKS,
 		trimEnd: 0,
 		params: {},
-	} as never;
+	};
 }
 
 function tracks({
@@ -66,11 +84,13 @@ function tracks({
 	overlay = [] as Array<{ type: string; muted?: boolean; elements: unknown[] }>,
 	audio = [] as Array<{ muted?: boolean; elements: unknown[] }>,
 }) {
+	// Structural fixtures: only the fields collectTranscriptionJobs reads.
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
 	return {
 		main: { id: "main", type: "video", name: "Main", elements: main },
 		overlay: overlay.map((t, i) => ({ id: `ov${i}`, name: `ov${i}`, ...t })),
 		audio: audio.map((t, i) => ({ id: `au${i}`, type: "audio", name: `au${i}`, ...t })),
-	} as never;
+	} as unknown as SceneTracks;
 }
 
 beforeEach(() => {
@@ -87,19 +107,19 @@ describe("collectTranscriptionJobs (whole-timeline captions)", () => {
 	test("collects EVERY audible clip across main, overlay, and audio tracks in timeline order", () => {
 		const jobs = collectTranscriptionJobs({
 			tracks: tracks({
-				main: [videoEl("b", "assetB", 6, 4), videoEl("a", "assetA", 0, 6)],
+				main: [videoEl({ id: "b", mediaId: "assetB", startSec: 6, durSec: 4 }), videoEl({ id: "a", mediaId: "assetA", startSec: 0, durSec: 6 })],
 				overlay: [
-					{ type: "video", elements: [videoEl("pip", "assetC", 3, 2)] },
+					{ type: "video", elements: [videoEl({ id: "pip", mediaId: "assetC", startSec: 3, durSec: 2 })] },
 					// caption/text overlay tracks are not transcription sources
 					{ type: "caption", elements: [] },
 				],
-				audio: [{ elements: [audioEl("vo", "assetD", 1, 5)] }],
+				audio: [{ elements: [audioEl({ id: "vo", mediaId: "assetD", startSec: 1, durSec: 5 })] }],
 			}),
 			assets: [
-				asset("assetA", "Media/a.mp4"),
-				asset("assetB", "Media/b.mp4"),
-				asset("assetC", "Media/c.mp4"),
-				asset("assetD", "Media/d.m4a"),
+				asset({ id: "assetA", rel: "Media/a.mp4" }),
+				asset({ id: "assetB", rel: "Media/b.mp4" }),
+				asset({ id: "assetC", rel: "Media/c.mp4" }),
+				asset({ id: "assetD", rel: "Media/d.m4a" }),
 			],
 		});
 
@@ -120,15 +140,15 @@ describe("collectTranscriptionJobs (whole-timeline captions)", () => {
 		const jobs = collectTranscriptionJobs({
 			tracks: tracks({
 				main: [
-					videoEl("ok", "assetA", 0, 4),
-					videoEl("hidden", "assetA", 4, 2, { hidden: true }),
-					videoEl("muted", "assetA", 6, 2, { params: { muted: true } }),
-					videoEl("noAudio", "assetA", 8, 2, { isSourceAudioEnabled: false }),
+					videoEl({ id: "ok", mediaId: "assetA", startSec: 0, durSec: 4 }),
+					videoEl({ id: "hidden", mediaId: "assetA", startSec: 4, durSec: 2, extra: { hidden: true } }),
+					videoEl({ id: "muted", mediaId: "assetA", startSec: 6, durSec: 2, extra: { params: { muted: true } } }),
+					videoEl({ id: "noAudio", mediaId: "assetA", startSec: 8, durSec: 2, extra: { isSourceAudioEnabled: false } }),
 				],
-				overlay: [{ type: "video", muted: true, elements: [videoEl("x", "assetA", 0, 2)] }],
-				audio: [{ muted: true, elements: [audioEl("vo", "assetA", 0, 2)] }],
+				overlay: [{ type: "video", muted: true, elements: [videoEl({ id: "x", mediaId: "assetA", startSec: 0, durSec: 2 })] }],
+				audio: [{ muted: true, elements: [audioEl({ id: "vo", mediaId: "assetA", startSec: 0, durSec: 2 })] }],
 			}),
-			assets: [asset("assetA", "Media/a.mp4")],
+			assets: [asset({ id: "assetA", rel: "Media/a.mp4" })],
 		});
 		expect(jobs.map((j) => j.assetId)).toEqual(["assetA"]);
 		expect(jobs).toHaveLength(1);
@@ -137,18 +157,18 @@ describe("collectTranscriptionJobs (whole-timeline captions)", () => {
 	test("split clips share one source path (transcribe-once, window-per-clip)", () => {
 		const jobs = collectTranscriptionJobs({
 			tracks: tracks({
-				main: [videoEl("left", "assetA", 0, 3), videoEl("right", "assetA", 3, 3)],
+				main: [videoEl({ id: "left", mediaId: "assetA", startSec: 0, durSec: 3 }), videoEl({ id: "right", mediaId: "assetA", startSec: 3, durSec: 3 })],
 			}),
-			assets: [asset("assetA", "Media/a.mp4")],
+			assets: [asset({ id: "assetA", rel: "Media/a.mp4" })],
 		});
 		expect(jobs).toHaveLength(2);
 		expect(new Set(jobs.map((j) => j.rawPath)).size).toBe(1);
 	});
 
 	test("clips without an on-device file drop out silently (web dev harness)", () => {
-		const webAsset = { ...(asset("web", "x") as object), nativeRelativePath: undefined } as never;
+		const webAsset = { ...asset({ id: "web", rel: "x" }), nativeRelativePath: undefined };
 		const jobs = collectTranscriptionJobs({
-			tracks: tracks({ main: [videoEl("w", "web", 0, 3)] }),
+			tracks: tracks({ main: [videoEl({ id: "w", mediaId: "web", startSec: 0, durSec: 3 })] }),
 			assets: [webAsset],
 		});
 		expect(jobs).toHaveLength(0);

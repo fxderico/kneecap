@@ -14,7 +14,7 @@ import { SYSTEM_FONTS } from "@/fonts/system-fonts";
  * a broader locally-bundled OFL set is scoped to a later milestone
  * (plan M8, "Text" panel — "bundle a curated OFL font set locally").
  */
-const LOCAL_FONTS = new Set<string>(["Inter"]);
+const LOCAL_FONTS = new Set<string>(["Inter", "Albert Sans"]);
 
 /** M8 Text panel's font picker reads this rather than re-declaring its own
  *  list — see the header above for why it's still just `["Inter"]`. */

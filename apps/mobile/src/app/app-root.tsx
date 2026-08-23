@@ -22,7 +22,7 @@ import { Component, StrictMode, useEffect, useRef, useState, type ReactNode } fr
 import { createRoot } from "react-dom/client";
 import { EditorCore, registerNativeMediaPathResolver, registerNativeAudioRouter } from "@kneecap/editor-core";
 import { getNativeBridge } from "@kneecap/native-bridge";
-import { loadFontAtlas } from "@kneecap/editor-core/fonts/local-fonts";
+import { loadFontAtlas, loadFonts } from "@kneecap/editor-core/fonts/local-fonts";
 import { useEditor } from "@kneecap/editor-core/react";
 import { EditorShell, ensurePreviewGpu } from "@kneecap/mobile-ui";
 
@@ -328,6 +328,11 @@ export function mountApp() {
 	// (text renders with a fallback face without it). Both are cached
 	// one-shot promises; PreviewRenderer awaits the same GPU promise.
 	void ensurePreviewGpu().then(() => loadFontAtlas());
+	// The DEFAULT face (Albert Sans, round 31) must be decoded before the
+	// first text/caption render or canvas fillText falls back to the system
+	// font for that frame — @font-face alone only loads on first CSS use,
+	// which never happens for canvas-drawn text.
+	void loadFonts({ families: ["Albert Sans"] });
 	// Anchor persisted container-RELATIVE media paths to THIS install's
 	// custody root before any project load needs them (iOS rotates the
 	// container UUID every update/reinstall — media/native-paths.ts). Fire

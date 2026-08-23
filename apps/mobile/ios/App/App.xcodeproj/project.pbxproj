@@ -34,6 +34,7 @@
 		E7853237CE3EE88834CC5DDA /* MediaProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9E4AF30061CAD06771641C2 /* MediaProbe.swift */; };
 		EAA9A16D6D45CE0F8AC1F317 /* ProxyTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F5C60B9D68F1E648F2029D /* ProxyTranscoder.swift */; };
 		BB10AE10AE10AE10AE10AE10 /* NativeAudioPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10AE10AE10AE10AE10AE10 /* NativeAudioPreview.swift */; };
+		BB31F0A1F0A1F0A1F0A1F0A1 /* fonts in Resources */ = {isa = PBXBuildFile; fileRef = AA31F0A1F0A1F0A1F0A1F0A1 /* fonts */; };
 		BB10AE11AE11AE11AE11AE11 /* AppleSpeechTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10AE11AE11AE11AE11AE11 /* AppleSpeechTranscriber.swift */; };
 		BB10AE12AE12AE12AE12AE12 /* NativeBridgePlugin+Transcribe.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10AE12AE12AE12AE12AE12 /* NativeBridgePlugin+Transcribe.swift */; };
 		F4E28BDF2E5CF34A1EC39DC1 /* NativeBridgePlugin+Media.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82FAE7E1DF147549BC77C247 /* NativeBridgePlugin+Media.swift */; };
@@ -57,6 +58,7 @@
 		5C29089217A122709B9713B2 /* NativeBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeBridgePlugin.swift; sourceTree = "<group>"; };
 		62F5C60B9D68F1E648F2029D /* ProxyTranscoder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProxyTranscoder.swift; sourceTree = "<group>"; };
 		AA10AE10AE10AE10AE10AE10 /* NativeAudioPreview.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeAudioPreview.swift; sourceTree = "<group>"; };
+		AA31F0A1F0A1F0A1F0A1F0A1 /* fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = fonts; sourceTree = "<group>"; };
 		AA10AE11AE11AE11AE11AE11 /* AppleSpeechTranscriber.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppleSpeechTranscriber.swift; sourceTree = "<group>"; };
 		AA10AE12AE12AE12AE12AE12 /* NativeBridgePlugin+Transcribe.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "NativeBridgePlugin+Transcribe.swift"; sourceTree = "<group>"; };
 		638A6FC5ACDE6FBAB50CDDD7 /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures; sourceTree = "<group>"; };
@@ -124,6 +126,7 @@
 				F3A2C41D9E5B4A6C8D0E1F72 /* NativeExport */,
 				638A6FC5ACDE6FBAB50CDDD7 /* Fixtures */,
 				2B85B4A3074F3DECCE8DF32C /* FirstRunView.swift */,
+				AA31F0A1F0A1F0A1F0A1F0A1 /* fonts */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -222,6 +225,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */,
+				BB31F0A1F0A1F0A1F0A1F0A1 /* fonts in Resources */,
 				50B271D11FEDC1A000F3C39B /* public in Resources */,
 				504EC30F1FED79650016851F /* Assets.xcassets in Resources */,
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,

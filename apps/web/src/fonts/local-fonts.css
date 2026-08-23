@@ -25,3 +25,25 @@
 		U+02DD-02FF, U+1E00-1EFF, U+2020, U+20A0-20AB, U+2113, U+2C60-2C7F,
 		U+A720-A7FF;
 }
+
+/* Albert Sans — the editor's DEFAULT text/caption face (round 31).
+ * CapCut Web's "Default" font is literally Albert Sans (verified live:
+ * adding default text fetches AlbertSansLatin.woff2 from their CDN), and
+ * the community-identified "Proxima Nova" answer matches — Albert Sans is
+ * the OFL near-equivalent. SIL OFL licensed; see
+ * public/fonts/local/OFL-AlbertSans.txt. Served same-origin, no network. */
+@font-face {
+	font-family: "Albert Sans";
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url("/fonts/local/AlbertSans-Regular.ttf") format("truetype");
+}
+@font-face {
+	font-family: "Albert Sans";
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url("/fonts/local/AlbertSans-Bold.ttf") format("truetype");
+}
+

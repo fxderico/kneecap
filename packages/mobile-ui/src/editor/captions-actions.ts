@@ -53,6 +53,7 @@ import {
 	ApplyCaptionStyleCommand,
 	UpdateElementsCommand,
 } from "@kneecap/editor-core/commands";
+import { DEFAULT_TEXT_BORDER_WIDTH } from "@kneecap/editor-core/text/typography";
 import { windowSegmentsToClip } from "./caption-window";
 import {
 	getNativeBridge,
@@ -115,15 +116,18 @@ export function collectTranscriptionJobs({
 	const assetById = new Map(assets.map((a) => [a.id, a]));
 	const jobs: TranscriptionJob[] = [];
 
-	const pushJob = (
+	const pushJob = ({
+		element,
+		assetKind,
+	}: {
 		element: {
 			mediaId: string;
 			startTime: MediaTime;
 			duration: MediaTime;
 			trimStart: MediaTime;
-		},
-		assetKind: "video" | "audio",
-	) => {
+		};
+		assetKind: "video" | "audio";
+	}) => {
 		const asset = assetById.get(element.mediaId);
 		const rawPath = asset?.sourceNativeRelativePath
 			? resolveNativeMediaRawPath(asset.sourceNativeRelativePath)
@@ -150,14 +154,14 @@ export function collectTranscriptionJobs({
 	for (const el of tracks.main.elements) {
 		if (el.type !== "video" || el.hidden) continue;
 		if (el.params.muted === true || el.isSourceAudioEnabled === false) continue;
-		pushJob(el, "video");
+		pushJob({ element: el, assetKind: "video" });
 	}
 	for (const track of tracks.overlay) {
 		if (track.type !== "video" || track.muted) continue;
 		for (const el of track.elements) {
 			if (el.type !== "video" || el.hidden) continue;
 			if (el.params.muted === true || el.isSourceAudioEnabled === false) continue;
-			pushJob(el, "video");
+			pushJob({ element: el, assetKind: "video" });
 		}
 	}
 	for (const track of tracks.audio) {
@@ -165,7 +169,7 @@ export function collectTranscriptionJobs({
 		for (const el of track.elements) {
 			if (el.type !== "audio" || el.sourceType !== "upload") continue;
 			if (el.params.muted === true) continue;
-			pushJob(el, "audio");
+			pushJob({ element: el, assetKind: "audio" });
 		}
 	}
 
@@ -375,6 +379,48 @@ export function getCaptionHighlightEnabled({ editor }: { editor: EditorCore }): 
 	const first = getAllCaptions({ editor })[0];
 	if (!first) return true;
 	return first.element.params.animationStyle !== "none";
+}
+
+/** Round 31 (founder: "a default thin black border I can add around any
+ *  text or captions"): captions are a synced family, so the border reads
+ *  from the first one. */
+export function getCaptionBorderEnabled({ editor }: { editor: EditorCore }): boolean {
+	const first = getAllCaptions({ editor })[0];
+	if (!first) return false;
+	const width = first.element.params.strokeWidth;
+	return typeof width === "number" && width > 0;
+}
+
+/** Flips the thin black border on EVERY caption in one undoable patch.
+ *  DEFAULT_TEXT_BORDER_WIDTH is CapCut's own default border weight
+ *  (pixel-measured on capcut.com — see the constant's doc comment). */
+export function setCaptionBorderEnabled({
+	editor,
+	enabled,
+}: {
+	editor: EditorCore;
+	enabled: boolean;
+}): void {
+	const captions = getAllCaptions({ editor });
+	if (captions.length === 0) return;
+	editor.command.execute({
+		command: new UpdateElementsCommand({
+			updates: captions.map(({ trackId, element }) => ({
+				trackId,
+				elementId: element.id,
+				patch: {
+					params: {
+						...element.params,
+						strokeWidth: enabled ? DEFAULT_TEXT_BORDER_WIDTH : 0,
+						strokeColor:
+							typeof element.params.strokeColor === "string"
+								? element.params.strokeColor
+								: "#000000",
+					},
+				},
+			})),
+		}),
+	});
 }
 
 /** Round 23 (founder: "highlighting the word ... should be optional") —

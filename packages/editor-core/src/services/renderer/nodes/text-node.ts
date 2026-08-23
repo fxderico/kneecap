@@ -2,7 +2,7 @@ import { BaseNode } from "./base-node";
 import type { TextElement } from "@/timeline";
 import type { EffectPass } from "@/effects/types";
 import type { BlendMode, Transform } from "@/rendering";
-import { drawMeasuredTextLayout } from "@/text/primitives";
+import { drawMeasuredTextLayout, strokeMeasuredTextLayout } from "@/text/primitives";
 import type { MeasuredTextElement } from "@/text/measure-element";
 
 export type TextNodeParams = TextElement & {
@@ -19,6 +19,11 @@ export interface ResolvedTextNodeState {
 	opacity: number;
 	textColor: string;
 	backgroundColor: string;
+	/** Text border (round 31). `strokeWidth` is in FONT-SIZE units — the
+	 *  draw scales it by scaledFontSize/fontSize so the border keeps the
+	 *  same weight relative to the glyphs at every canvas size. 0 = off. */
+	strokeColor: string;
+	strokeWidth: number;
 	effectPasses: EffectPass[][];
 	measuredText: MeasuredTextElement;
 }
@@ -46,6 +51,22 @@ export function renderTextToContext({
 	ctx.scale(resolved.transform.scaleX, resolved.transform.scaleY);
 	if (resolved.transform.rotate) {
 		ctx.rotate((resolved.transform.rotate * Math.PI) / 180);
+	}
+
+	if (resolved.strokeWidth > 0) {
+		// Border under the fill (CapCut's stroke+fill model). strokeWidth is
+		// font-relative: scale to the layout's rendered font size so the
+		// ratio holds at every canvas size.
+		const layout = resolved.measuredText;
+		const fontSize = layout.fontSizeRatio * 15; // fontSizeRatio = fontSize/15
+		strokeMeasuredTextLayout({
+			ctx,
+			layout,
+			strokeColor: resolved.strokeColor,
+			strokeWidth:
+				resolved.strokeWidth * (layout.scaledFontSize / Math.max(fontSize, 1)),
+			textBaseline: baseline,
+		});
 	}
 
 	drawMeasuredTextLayout({

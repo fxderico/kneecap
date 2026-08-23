@@ -378,6 +378,14 @@ function resolveTextNode({
 			propertyPath: "background.color",
 			localTime,
 		}),
+		strokeColor:
+			typeof node.params.params.strokeColor === "string"
+				? node.params.params.strokeColor
+				: "#000000",
+		strokeWidth:
+			typeof node.params.params.strokeWidth === "number"
+				? node.params.params.strokeWidth
+				: 0,
 		effectPasses: resolveEffectPassGroups({
 			effects: node.params.effects,
 			animations: node.params.animations,

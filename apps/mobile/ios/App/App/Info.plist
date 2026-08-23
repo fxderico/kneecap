@@ -90,5 +90,10 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>UIAppFonts</key>
+	<array>
+		<string>fonts/AlbertSans-Regular.ttf</string>
+		<string>fonts/AlbertSans-Bold.ttf</string>
+	</array>
 </dict>
 </plist>

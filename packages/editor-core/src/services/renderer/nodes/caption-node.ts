@@ -128,7 +128,15 @@ export function renderCaptionToContext({
 
 		if (style.strokeWidth > 0) {
 			ctx.strokeStyle = style.strokeColor;
-			ctx.lineWidth = style.strokeWidth;
+			// FONT-relative width (round 31): the raw-px lineWidth rendered
+			// near-hairline once the font scaled up with the canvas
+			// (scaledFontSize = fontSize × canvasHeight/90 while lineWidth
+			// stayed raw). Scaling by the same factor keeps the border's
+			// weight proportional to the glyphs everywhere — and matches the
+			// export's kCTStrokeWidth percentage math.
+			ctx.lineWidth =
+				style.strokeWidth * (line.scaledFontSize / Math.max(style.fontSize, 1));
+			ctx.lineJoin = "round";
 			ctx.strokeText(word.text, wordX, 0);
 		}
 

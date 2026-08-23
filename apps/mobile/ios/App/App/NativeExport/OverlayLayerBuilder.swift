@@ -74,7 +74,14 @@ public enum OverlayLayerBuilder {
 		let fontSize = CGFloat(clip.params["fontSize"]?.asDouble ?? 48)
 		let color = cgColor(fromHex: clip.params["color"]?.asString ?? "#FFFFFF")
 		let bold = (clip.params["fontWeight"]?.asString ?? "normal") == "bold"
-		let font = resolveFont(family: clip.params["fontFamily"]?.asString ?? "Arial", bold: bold, size: fontSize)
+		let font = resolveFont(family: clip.params["fontFamily"]?.asString ?? "Albert Sans", bold: bold, size: fontSize)
+
+		// Text border (round 31): same font-relative strokeWidth semantics
+		// as captions — here the CTFont size IS the raw param fontSize, so
+		// the value passes through unscaled and rasterizeLine's
+		// px→percent conversion yields strokeWidth/fontSize directly.
+		let textStrokeWidth = CGFloat(clip.params["strokeWidth"]?.asDouble ?? 0)
+		let textStrokeColor = cgColor(fromHex: clip.params["strokeColor"]?.asString ?? "#000000")
 
 		let width = lineWidth(content, font: font)
 		let height = fontSize * 1.3
@@ -84,8 +91,8 @@ public enum OverlayLayerBuilder {
 			scaledFontSize: fontSize,
 			totalWidth: width,
 			totalHeight: height,
-			strokeColor: nil,
-			strokeWidth: 0,
+			strokeColor: textStrokeWidth > 0 ? textStrokeColor : nil,
+			strokeWidth: textStrokeWidth,
 			background: nil,
 			activePill: nil
 		) else { return nil }
@@ -183,8 +190,11 @@ public enum OverlayLayerBuilder {
 				scaledFontSize: scaledFontSize,
 				totalWidth: totalWidth,
 				totalHeight: totalHeight,
+				// strokeWidth is FONT-relative (round 31) — scale to the
+				// rasterized font so rasterizeLine's px→percent conversion
+				// yields strokeWidth/fontSize, matching the preview exactly.
 				strokeColor: style.strokeWidth > 0 ? style.strokeColor : nil,
-				strokeWidth: style.strokeWidth,
+				strokeWidth: style.strokeWidth * (scaledFontSize / max(style.fontSize, 1)),
 				background: style.backgroundEnabled
 					? RasterPill(centerX: totalWidth / 2, width: totalWidth + scaledFontSize * 0.8, height: totalHeight + scaledFontSize * 0.5, color: style.backgroundColor)
 					: nil,
@@ -233,7 +243,7 @@ public enum OverlayLayerBuilder {
 		let fraction: CGFloat = position == "top" ? -0.36 : position == "center" ? 0 : 0.36
 		let animationStyle = p["animationStyle"]?.asString ?? "karaoke"
 		return CaptionStyle(
-			fontFamily: p["fontFamily"]?.asString ?? "Arial",
+			fontFamily: p["fontFamily"]?.asString ?? "Albert Sans",
 			fontSize: CGFloat(p["fontSize"]?.asDouble ?? 22),
 			bold: (p["fontWeight"]?.asString ?? "bold") == "bold",
 			color: cgColor(fromHex: p["color"]?.asString ?? "#ffffff"),
@@ -268,6 +278,12 @@ public enum OverlayLayerBuilder {
 	}
 
 	private static func resolveFont(family: String, bold: Bool, size: CGFloat) -> CTFont {
+		if family == "Albert Sans" {
+			// Bundled with the app (UIAppFonts, round 31) under its
+			// PostScript names — resolve those directly rather than trusting
+			// family-name lookup on a just-registered font.
+			return CTFontCreateWithName((bold ? "AlbertSans-Bold" : "AlbertSans-Regular") as CFString, size, nil)
+		}
 		if family == "Arial" || family == "Inter" {
 			// Arial ships on both platforms under its PostScript names;
 			// Inter is the app's UI font but is not installed system-wide,

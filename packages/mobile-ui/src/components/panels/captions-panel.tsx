@@ -11,6 +11,8 @@ import {
 	applyCaptionStyleToAll,
 	getCaptionHighlightEnabled,
 	setCaptionHighlightEnabled,
+	getCaptionBorderEnabled,
+	setCaptionBorderEnabled,
 } from "../../editor/captions-actions";
 import { setCaptionText } from "../../editor/actions";
 import { ToggleRow } from "../editor/param-row";
@@ -70,6 +72,7 @@ export function CaptionsPanel({ editor, onClose, onInserted, selectedCaption }: 
 	// Read live from the engine each render (the shell re-renders this panel
 	// on timeline changes, same as the caption textarea's words).
 	const highlightEnabled = getCaptionHighlightEnabled({ editor });
+	const borderEnabled = getCaptionBorderEnabled({ editor });
 
 	const handleGenerate = () => {
 		setState("generating");
@@ -156,6 +159,14 @@ export function CaptionsPanel({ editor, onClose, onInserted, selectedCaption }: 
 				label="Highlight spoken word"
 				active={highlightEnabled}
 				onToggle={() => setCaptionHighlightEnabled({ editor, enabled: !highlightEnabled })}
+			/>
+			{/* Round 31 (founder: "a default thin black border I can add
+			    around any text or captions") — one tap, applied to the whole
+			    caption family; the weight is DEFAULT_TEXT_BORDER_WIDTH. */}
+			<ToggleRow
+				label="Black border"
+				active={borderEnabled}
+				onToggle={() => setCaptionBorderEnabled({ editor, enabled: !borderEnabled })}
 			/>
 		</PanelSheet>
 	);

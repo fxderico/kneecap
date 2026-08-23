@@ -56,7 +56,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		// highlight; the "Highlight spoken word" toggle in the captions
 		// edit view (and the explicitly-karaoke presets) turn it on.
 		params: {
-			fontFamily: "Arial",
+			fontFamily: "Albert Sans",
 			fontSize: 18,
 			fontWeight: "bold",
 			color: "#ffffff",
@@ -76,7 +76,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		id: "classic",
 		name: "Classic",
 		params: {
-			fontFamily: "Arial",
+			fontFamily: "Albert Sans",
 			fontSize: 22,
 			fontWeight: "bold",
 			color: "#ffffff",
@@ -96,7 +96,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		id: "bold-highlight",
 		name: "Bold Highlight",
 		params: {
-			fontFamily: "Arial",
+			fontFamily: "Albert Sans",
 			fontSize: 24,
 			fontWeight: "bold",
 			color: "#ffffff",
@@ -116,7 +116,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		id: "kneecap-cyan",
 		name: "Cyan Karaoke",
 		params: {
-			fontFamily: "Arial",
+			fontFamily: "Albert Sans",
 			fontSize: 23,
 			fontWeight: "bold",
 			color: "#ffffff",
@@ -136,7 +136,7 @@ export const CAPTION_STYLE_PRESETS: readonly CaptionStylePreset[] = [
 		id: "minimal",
 		name: "Minimal",
 		params: {
-			fontFamily: "Arial",
+			fontFamily: "Albert Sans",
 			fontSize: 18,
 			fontWeight: "normal",
 			color: "#d4d4d4",

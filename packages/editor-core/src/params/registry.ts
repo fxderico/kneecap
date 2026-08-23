@@ -204,7 +204,12 @@ const textElementParams: ElementParamDefinition[] = [
 		key: "fontFamily",
 		label: "Font Family",
 		type: "font",
-		default: "Arial",
+		// Albert Sans (round 31): CapCut's own default face — their web
+		// editor literally ships AlbertSansLatin.woff2 as "Default", and
+		// the community's "Proxima Nova" identification matches (Albert
+		// Sans is the OFL near-equivalent). Bundled locally, see
+		// fonts/local-fonts.ts.
+		default: "Albert Sans",
 		keyframable: false,
 	},
 	{
@@ -220,6 +225,25 @@ const textElementParams: ElementParamDefinition[] = [
 		label: "Color",
 		type: "color",
 		default: "#ffffff",
+	},
+	{
+		key: "strokeColor",
+		label: "Border Color",
+		type: "color",
+		default: "#000000",
+	},
+	{
+		// FONT-SIZE units, not raw canvas px (round 31): the rendered line
+		// width scales with the font (`lineWidth = strokeWidth *
+		// scaledFontSize / fontSize`), so the same value reads identically
+		// at every canvas size. CapCut's default border measures 20% of
+		// the font size (captured + pixel-measured on capcut.com).
+		key: "strokeWidth",
+		label: "Border",
+		type: "number",
+		default: 0,
+		min: 0,
+		step: 0.5,
 	},
 	{
 		key: "textAlign",
@@ -377,7 +401,7 @@ const captionElementParams: ElementParamDefinition[] = [
 		key: "fontFamily",
 		label: "Font Family",
 		type: "font",
-		default: String(captionDefault({ key: "fontFamily", fallback: "Arial" })),
+		default: String(captionDefault({ key: "fontFamily", fallback: "Albert Sans" })),
 		keyframable: false,
 	},
 	{

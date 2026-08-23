@@ -9,6 +9,7 @@ import type { EditorCore } from "@kneecap/editor-core";
 import type { ElementRef, TextElement } from "@kneecap/editor-core/timeline";
 import { getLocallyAvailableFonts } from "@kneecap/editor-core/fonts/local-fonts";
 import { setElementParam } from "../../editor/actions";
+import { DEFAULT_TEXT_BORDER_WIDTH } from "@kneecap/editor-core/text/typography";
 
 const SWATCHES = ["#f5f5f5", "#00cae0", "#ff5a5f", "#ffd54a", "#4ade80", "#000000"];
 
@@ -40,6 +41,11 @@ export function TextPanel({ editor, elementRef, element, onClose, onAddText }: T
 	const backgroundEnabled = Boolean(element?.params["background.enabled"]);
 
 	const content = element && typeof element.params.content === "string" ? element.params.content : "";
+	// Round 31 (founder: "a default thin black border I can add around any
+	// text or captions"). strokeWidth is in font-size units — see
+	// DEFAULT_TEXT_BORDER_WIDTH.
+	const borderWidth =
+		element && typeof element.params.strokeWidth === "number" ? element.params.strokeWidth : 0;
 
 	return (
 		<PanelSheet onScrimClick={onClose} header={<SheetHeader onClose={onClose} />}>
@@ -126,6 +132,21 @@ export function TextPanel({ editor, elementRef, element, onClose, onAddText }: T
 						onToggle={() =>
 							setElementParam({ editor, ref: elementRef, key: "fontStyle", value: italic ? "normal" : "italic" })
 						}
+					/>
+					<ToggleRow
+						label="Black border"
+						active={borderWidth > 0}
+						onToggle={() => {
+							setElementParam({
+								editor,
+								ref: elementRef,
+								key: "strokeWidth",
+								value: borderWidth > 0 ? 0 : DEFAULT_TEXT_BORDER_WIDTH,
+							});
+							if (borderWidth === 0) {
+								setElementParam({ editor, ref: elementRef, key: "strokeColor", value: "#000000" });
+							}
+						}}
 					/>
 					<ToggleRow
 						label="Background"
