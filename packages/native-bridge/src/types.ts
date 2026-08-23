@@ -25,6 +25,14 @@ import type { Edl, EdlRational } from "@kneecap/editor-core/edl";
 
 export type Platform = "ios" | "android" | "web";
 
+/** One prerendered overlay image and the output span it covers. */
+export interface ExportOverlayFrame {
+	startTicks: number;
+	endTicks: number;
+	/** Base64 PNG (no `data:` prefix) at the export resolution. */
+	pngBase64: string;
+}
+
 export type MediaKind = "video" | "audio" | "image";
 
 /**
@@ -317,7 +325,17 @@ export interface NativeBridge {
 		handle: MediaHandle;
 		spec: ProxySpec;
 	}): AsyncGenerator<ProxyProgress>;
-	exportProject(params: { edl: Edl }): AsyncGenerator<ExportProgress>;
+	exportProject(params: {
+		edl: Edl;
+		/** Text/caption overlays PRERENDERED by the preview's own drawing
+		 *  code (`editor-core/export/overlay-frames.ts`), as full-frame
+		 *  transparent PNGs with the time range each covers. When present
+		 *  the native exporter composites these instead of re-rasterizing
+		 *  text and captions itself — one implementation, so preview and
+		 *  export cannot drift. Omitted (older callers, the standalone
+		 *  verify harness) → the native CoreText path still applies. */
+		overlayFrames?: ExportOverlayFrame[];
+	}): AsyncGenerator<ExportProgress>;
 	transcribe(params: {
 		handle: MediaHandle;
 		opts: TranscribeOptions;

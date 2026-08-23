@@ -615,7 +615,25 @@ async function driveAndSample({
 			},
 		});
 		let outputUri: string | null = null;
-		for await (const p of bridge.exportProject({ edl })) {
+		// Round 37: text/captions rendered by the PREVIEW's own code and
+		// handed to the exporter, so the exported overlay layer IS the
+		// editor's drawing.
+		const { renderOverlayFrames } = await import(
+			"@kneecap/editor-core/export/overlay-frames"
+		);
+		const overlayFrames = await renderOverlayFrames({
+			tracks: editor.scenes.getActiveScene().tracks,
+			mediaAssets: editor.media.getAssets(),
+			canvasSize: {
+				width: edl.output.resolution.width,
+				height: edl.output.resolution.height,
+			},
+			fps: edl.output.fps,
+			durationTicks: edl.meta.durationTicks,
+			ticksPerSecond: edl.meta.ticksPerSecond,
+		});
+		log(`overlay frames prerendered: ${overlayFrames.length}`);
+		for await (const p of bridge.exportProject({ edl, overlayFrames })) {
 			if (p.stage === "error") throw new Error(p.error ?? "export error");
 			if (p.stage === "done") outputUri = p.outputUri ?? null;
 		}

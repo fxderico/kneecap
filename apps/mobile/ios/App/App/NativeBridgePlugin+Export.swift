@@ -1,6 +1,8 @@
 import Foundation
 import Capacitor
 import Photos
+import CoreImage
+import ImageIO
 
 /// kneecap M9 — the native half of `NativeBridge.exportProject()`
 /// (packages/native-bridge/src/capacitor-bridge.ts). All the actual mapping
@@ -35,6 +37,38 @@ extension NativeBridgePlugin {
         var assetById: [String: EdlAsset] = [:]
         for a in edl.assets { assetById[a.assetId] = a }
 
+        // PRERENDERED OVERLAYS (round 37): text/caption images produced by
+        // the PREVIEW's own drawing code
+        // (editor-core/export/overlay-frames.ts), each covering an output
+        // span. When present, the exporter composites these instead of
+        // re-rasterizing text and captions in CoreText — one implementation,
+        // so preview and export cannot drift. Decoding failures degrade to
+        // the native path rather than failing the export.
+        var overlayFrames: [PrerenderedOverlayFrame] = []
+        for entry in call.getArray("overlayFrames") ?? [] {
+            guard let dict = entry as? [String: Any],
+                  let base64 = dict["pngBase64"] as? String,
+                  let startTicks = (dict["startTicks"] as? NSNumber)?.int64Value,
+                  let endTicks = (dict["endTicks"] as? NSNumber)?.int64Value,
+                  endTicks > startTicks,
+                  let data = Data(base64Encoded: base64),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                print("[kneecap-export] overlay frame could not be decoded — skipped")
+                continue
+            }
+            overlayFrames.append(
+                PrerenderedOverlayFrame(
+                    startTicks: startTicks,
+                    endTicks: endTicks,
+                    image: CIImage(cgImage: image)
+                )
+            )
+        }
+        if !overlayFrames.isEmpty {
+            print("[kneecap-export] using \(overlayFrames.count) prerendered overlay frame(s) from the preview renderer")
+        }
+
         let handle = EdlExportHandle()
         activeExportHandles[exportId] = handle
 
@@ -52,6 +86,7 @@ extension NativeBridgePlugin {
                 let outputURL = try MediaSandbox.exportURL(exportId: exportId)
                 let result = try await EdlExporter.export(
                     edl: edl,
+                    overlayFrames: overlayFrames,
                     resolveAssetURL: { asset in
                         // `EdlAsset.sourceUri` is a plain sandbox filesystem
                         // path for a natively-imported asset (M4's real

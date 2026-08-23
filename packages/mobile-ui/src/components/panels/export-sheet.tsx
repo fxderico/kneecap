@@ -8,6 +8,10 @@ import { buildEdl, type Edl } from "@kneecap/editor-core/edl";
 import type { ExportFormat, ExportQuality } from "@kneecap/editor-core/export";
 import { getNativeBridge, type ExportProgress } from "@kneecap/native-bridge";
 import {
+	renderOverlayFrames,
+	type OverlayFrame,
+} from "@kneecap/editor-core/export/overlay-frames";
+import {
 	buildNativeEdlAssetResolver, setProjectFps, setProjectResolution, toEdlMediaAssets } from "../../editor/actions";
 import type { FrameRate } from "opencut-wasm";
 
@@ -214,7 +218,31 @@ export function ExportSheet({ editor, onClose }: ExportSheetProps) {
 
 		try {
 			const bridge = await getNativeBridge();
-			const generator = bridge.exportProject({ edl });
+			// Render text/captions with the PREVIEW's own code (round 37) and
+			// hand the exporter the resulting images — one implementation of
+			// the visual contract, so what you saw is what you get. A failure
+			// here degrades to the native text path rather than blocking the
+			// export.
+			let overlayFrames: OverlayFrame[] = [];
+			try {
+				setProgress({ stage: "preparing", fraction: 0 });
+				overlayFrames = await renderOverlayFrames({
+					tracks: editor.scenes.getActiveScene().tracks,
+					mediaAssets: editor.media.getAssets(),
+					canvasSize: {
+						width: edl.output.resolution.width,
+						height: edl.output.resolution.height,
+					},
+					fps: edl.output.fps,
+					durationTicks: edl.meta.durationTicks,
+					ticksPerSecond: edl.meta.ticksPerSecond,
+					onProgress: (fraction: number) =>
+						setProgress({ stage: "preparing", fraction: fraction * 0.2 }),
+				});
+			} catch (error) {
+				console.warn("overlay prerender failed — native text path:", error);
+			}
+			const generator = bridge.exportProject({ edl, overlayFrames });
 			activeExportRef.current = generator;
 			for await (const event of generator) {
 				setProgress({ stage: event.stage, fraction: event.fraction });

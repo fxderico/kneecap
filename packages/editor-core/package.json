@@ -36,7 +36,8 @@
 		"./media/waveform-summary": "./src/media/waveform-summary.ts",
 		"./services/waveform-cache": "./src/services/waveform-cache/service.ts",
 		"./media/native-paths": "./src/media/native-paths.ts",
-		"./text/typography": "./src/text/typography.ts"
+		"./text/typography": "./src/text/typography.ts",
+		"./export/overlay-frames": "./src/export/overlay-frames.ts"
 	},
 	"scripts": {
 		"check-types": "tsc --project tsconfig.json --noEmit",

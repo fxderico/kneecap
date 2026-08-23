@@ -8,6 +8,23 @@ import ImageIO
 /// through `EdlTransitionCompositor` (transitions + the one wired v1
 /// effect), then layers text/sticker overlays on top via
 /// `AVVideoCompositionCoreAnimationTool`.
+/// A text/caption overlay image rendered by the PREVIEW's own drawing code
+/// (`editor-core/export/overlay-frames.ts`), covering one span of the
+/// output timeline. Full-frame and already at the export resolution, so
+/// the compositor draws it 1:1 with no geometry of its own — which is the
+/// whole point: there is no second implementation left to disagree.
+public struct PrerenderedOverlayFrame {
+	public var startTicks: Int64
+	public var endTicks: Int64
+	public var image: CIImage
+
+	public init(startTicks: Int64, endTicks: Int64, image: CIImage) {
+		self.startTicks = startTicks
+		self.endTicks = endTicks
+		self.image = image
+	}
+}
+
 public enum VideoCompositionBuilderError: Error, CustomStringConvertible {
 	case emptyTimeline
 	public var description: String { "EDL produced an empty main-track timeline (no clips, or all zero-duration)" }
@@ -24,7 +41,8 @@ public enum VideoCompositionBuilder {
 	public static func build(
 		edl: EdlDocument,
 		built: BuiltComposition,
-		resolveAssetURL: ((EdlAsset) -> URL?)? = nil
+		resolveAssetURL: ((EdlAsset) -> URL?)? = nil,
+		overlayFrames: [PrerenderedOverlayFrame] = []
 	) throws -> AVMutableVideoComposition {
 		guard built.totalDurationTicks > 0, !built.mainPlacements.isEmpty else {
 			throw VideoCompositionBuilderError.emptyTimeline
@@ -144,7 +162,27 @@ public enum VideoCompositionBuilder {
 			width: edl.output.resolution.width,
 			height: edl.output.resolution.height
 		)
-		let billboards = OverlayLayerBuilder.buildBillboards(edl: edl, renderSize: billboardRenderSize)
+		// Prerendered (preview-drawn) overlays win when supplied; the native
+		// CoreText rasterizer stays as the fallback for callers that don't
+		// send them (the standalone verify harness, older shells).
+		let billboards: [OverlayBillboard] =
+			overlayFrames.isEmpty
+				? OverlayLayerBuilder.buildBillboards(edl: edl, renderSize: billboardRenderSize)
+				: overlayFrames.map { frame in
+					OverlayBillboard(
+						states: [OverlayBillboardState(startSeconds: 0, image: frame.image)],
+						// Full frame, 1:1 — the image IS the output-resolution
+						// overlay layer, so no placement math applies.
+						rect: CGRect(origin: .zero, size: billboardRenderSize),
+						opacity: 1,
+						timeRange: EdlTime.cmTimeRange(
+							startTicks: frame.startTicks,
+							durationTicks: frame.endTicks - frame.startTicks,
+							ticksPerSecond: tps
+						),
+						zIndex: Int.max
+					)
+				}
 
 		func billboardsIntersecting(_ range: CMTimeRange) -> [OverlayBillboard] {
 			billboards.filter { $0.timeRange.intersection(range).duration.seconds > 0 }

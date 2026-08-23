@@ -85,6 +85,7 @@ import { subscribeToEvents } from "./event-generator";
 import { smoothWordTimings, type RawWordTiming } from "./caption-smoothing";
 import type {
 	DeviceCapabilities,
+	ExportOverlayFrame,
 	ExportProgress,
 	MediaHandle,
 	MediaKind,
@@ -216,7 +217,11 @@ interface NativeBridgePluginSpec {
 	 * "resolve on kickoff, stream the rest as `exportProgress` events"
 	 * shape as `generateProxy`; ack payload typed `unknown` for the same
 	 * reason. */
-	exportProject(params: { exportId: string; edl: Edl }): Promise<unknown>;
+	exportProject(params: {
+		exportId: string;
+		edl: Edl;
+		overlayFrames: ExportOverlayFrame[];
+	}): Promise<unknown>;
 	/** Plugin-private — NOT part of the public `NativeBridge` TS interface,
 	 * which expresses cancellation as the caller simply stopping iteration
 	 * of the `AsyncGenerator<ExportProgress>` `exportProject` returns. This
@@ -580,7 +585,13 @@ export function createCapacitorBridge({
 			}
 		},
 
-		async *exportProject({ edl }: { edl: Edl }): AsyncGenerator<ExportProgress> {
+		async *exportProject({
+			edl,
+			overlayFrames,
+		}: {
+			edl: Edl;
+			overlayFrames?: ExportOverlayFrame[];
+		}): AsyncGenerator<ExportProgress> {
 			const exportId = generateExportId();
 			// Subscribe BEFORE triggering the native call — same race
 			// avoided, and same error mapping applied, as `generateProxy`
@@ -598,7 +609,7 @@ export function createCapacitorBridge({
 			}
 
 			try {
-				await plugin.exportProject({ exportId, edl });
+				await plugin.exportProject({ exportId, edl, overlayFrames: overlayFrames ?? [] });
 			} catch (err) {
 				await events.return(undefined);
 				throw toNativeBridgeError({ err, method: "exportProject" });
