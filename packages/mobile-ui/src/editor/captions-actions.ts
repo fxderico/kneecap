@@ -36,7 +36,7 @@
  * the caller's own flags). That gap is real and left open, not papered
  * over: the panel's copy says exactly this.
  */
-import type { EditorCore, MediaAsset } from "@kneecap/editor-core";
+import type { EditorCore, MediaAsset, MediaTime } from "@kneecap/editor-core";
 import {
 	mediaTimeToSeconds,
 	resolveNativeMediaRawPath,
@@ -67,18 +67,112 @@ export interface GenerateCaptionsResult {
 }
 
 /**
- * Round 20 — REAL captions: transcribe an actual clip's audio on-device
- * (iOS: Apple Speech via NativeBridgePlugin+Transcribe.swift; Android:
- * whisper.cpp) and land the words as caption elements aligned under the
- * clip. Target = the selected video clip, else the first main-track video
- * clip. The transcript is source-relative; words are windowed to the
- * clip's [trimStart, trimStart+duration) and shifted clip-relative, so
- * captions land where the AUDIBLE audio is, trims respected.
+ * Round 20 — REAL captions: transcribe audio on-device (iOS: Apple
+ * Speech via NativeBridgePlugin+Transcribe.swift; Android: whisper.cpp)
+ * and land the words as caption elements aligned under the clips.
+ *
+ * Round 30 (founder screenshot: a quiet first clip = "No speech was
+ * detected" while the rest of the timeline was full of speech): the
+ * generate no longer targets ONE clip — it processes EVERY audible clip
+ * on the timeline (`collectTranscriptionJobs`), transcribing each SOURCE
+ * once and windowing the shared transcript per clip to its
+ * [trimStart, trimStart+duration), offset to the clip's timeline start.
  *
  * Throws with actionable messages ("no video clip", "no native media
  * file") — the caller (the panel, or generateCaptions below) decides how
  * to degrade.
  */
+export interface TranscriptionJob {
+	/** Raw on-device path fed to `NativeBridge.transcribe` (original
+	 *  preferred, proxy accepted — the exporter's custody preference). */
+	rawPath: string;
+	assetId: string;
+	assetKind: "video" | "audio";
+	fileName: string;
+	assetDurationMicros: number;
+	/** The clip's audible source window, for `windowSegmentsToClip`. */
+	trimStartMicros: number;
+	windowMicros: number;
+	/** Where the windowed words land on the timeline. */
+	timelineStartTime: MediaTime;
+}
+
+/**
+ * Round 30 (founder: "all audio from the entire timeline must be
+ * exported and processed"): every transcribable clip in timeline order —
+ * main-track video, overlay (PiP) video, and upload-audio clips
+ * (voiceovers) — with muted/hidden/audio-disabled clips skipped (captions
+ * follow what's AUDIBLE). Pure and unit-tested; clips without an
+ * on-device file (web dev harness) simply drop out.
+ */
+export function collectTranscriptionJobs({
+	tracks,
+	assets,
+}: {
+	tracks: ReturnType<EditorCore["scenes"]["getActiveScene"]>["tracks"];
+	assets: MediaAsset[];
+}): TranscriptionJob[] {
+	const assetById = new Map(assets.map((a) => [a.id, a]));
+	const jobs: TranscriptionJob[] = [];
+
+	const pushJob = (
+		element: {
+			mediaId: string;
+			startTime: MediaTime;
+			duration: MediaTime;
+			trimStart: MediaTime;
+		},
+		assetKind: "video" | "audio",
+	) => {
+		const asset = assetById.get(element.mediaId);
+		const rawPath = asset?.sourceNativeRelativePath
+			? resolveNativeMediaRawPath(asset.sourceNativeRelativePath)
+			: asset?.nativeRelativePath
+				? resolveNativeMediaRawPath(asset.nativeRelativePath)
+				: null;
+		if (!asset || !rawPath) return;
+		jobs.push({
+			rawPath,
+			assetId: asset.id,
+			assetKind,
+			fileName: asset.name,
+			assetDurationMicros: Math.round((asset.duration ?? 0) * 1_000_000),
+			trimStartMicros: Math.round(
+				mediaTimeToSeconds({ time: element.trimStart }) * 1_000_000,
+			),
+			windowMicros: Math.round(
+				mediaTimeToSeconds({ time: element.duration }) * 1_000_000,
+			),
+			timelineStartTime: element.startTime,
+		});
+	};
+
+	for (const el of tracks.main.elements) {
+		if (el.type !== "video" || el.hidden) continue;
+		if (el.params.muted === true || el.isSourceAudioEnabled === false) continue;
+		pushJob(el, "video");
+	}
+	for (const track of tracks.overlay) {
+		if (track.type !== "video" || track.muted) continue;
+		for (const el of track.elements) {
+			if (el.type !== "video" || el.hidden) continue;
+			if (el.params.muted === true || el.isSourceAudioEnabled === false) continue;
+			pushJob(el, "video");
+		}
+	}
+	for (const track of tracks.audio) {
+		if (track.muted) continue;
+		for (const el of track.elements) {
+			if (el.type !== "audio" || el.sourceType !== "upload") continue;
+			if (el.params.muted === true) continue;
+			pushJob(el, "audio");
+		}
+	}
+
+	jobs.sort((a, b) => a.timelineStartTime - b.timelineStartTime);
+	return jobs;
+}
+
 export async function generateCaptionsForClip({
 	editor,
 	stylePresetId,
@@ -87,83 +181,95 @@ export async function generateCaptionsForClip({
 	stylePresetId: string;
 }): Promise<GenerateCaptionsResult | null> {
 	const tracks = editor.scenes.getActiveScene().tracks;
-	const selectedRef = editor.selection.getSelectedElements()[0];
-	const selectedElement = selectedRef
-		? [tracks.main, ...tracks.overlay]
-				.find((track) => track.id === selectedRef.trackId)
-				?.elements.find((el) => el.id === selectedRef.elementId)
-		: undefined;
-	const target =
-		selectedElement?.type === "video"
-			? selectedElement
-			: tracks.main.elements.find(
-					(el): el is VideoElement => el.type === "video" && !el.hidden,
-				);
-	if (!target || target.type !== "video") {
+	const hasAnyVideo = tracks.main.elements.some(
+		(el): el is VideoElement => el.type === "video" && !el.hidden,
+	);
+	const hasAnyAudioClip = tracks.audio.some((track) =>
+		track.elements.some((el) => el.type === "audio"),
+	);
+	if (!hasAnyVideo && !hasAnyAudioClip) {
 		throw new Error("Add a video clip first — captions transcribe the clip's audio.");
 	}
 
-	const asset: MediaAsset | undefined = editor.media
-		.getAssets()
-		.find((a) => a.id === target.mediaId);
-	// Original preferred (full-quality audio), proxy accepted — the same
-	// custody preference the native exporter's asset resolver uses.
-	const rawPath = asset?.sourceNativeRelativePath
-		? resolveNativeMediaRawPath(asset.sourceNativeRelativePath)
-		: asset?.nativeRelativePath
-			? resolveNativeMediaRawPath(asset.nativeRelativePath)
-			: null;
-	if (!asset || !rawPath) {
+	const jobs = collectTranscriptionJobs({
+		tracks,
+		assets: editor.media.getAssets(),
+	});
+	if (jobs.length === 0) {
 		throw new Error(
 			"This clip has no on-device media file to transcribe (web dev harness clips can't be transcribed — native builds only).",
 		);
 	}
 
-	const handle: MediaHandle = {
-		id: asset.id,
-		uri: rawPath,
-		kind: "video",
-		fileName: asset.name,
-		sizeBytes: 0,
-		durationMicros: Math.round((asset.duration ?? 0) * 1_000_000),
-		width: asset.width ?? 0,
-		height: asset.height ?? 0,
-		rotationDegrees: 0,
-		hasAudio: true,
-		codec: "",
-		frameRate: null,
-	};
-
 	const bridge = await getNativeBridge();
-	const segments: TranscriptSegment[] = [];
-	for await (const segment of bridge.transcribe({
-		handle,
-		opts: { modelSize: "tiny" },
-	})) {
-		segments.push(segment);
+	// One transcription per SOURCE FILE, not per clip — a split-heavy
+	// timeline references the same source many times; each clip then
+	// windows the shared transcript to its own trim range.
+	const transcriptBySource = new Map<string, TranscriptSegment[]>();
+	const failures: string[] = [];
+	const allElements: ReturnType<typeof buildCaptionElementsFromTranscript> = [];
+	for (const job of jobs) {
+		let segments = transcriptBySource.get(job.rawPath);
+		if (!segments) {
+			try {
+				segments = [];
+				for await (const segment of bridge.transcribe({
+					handle: {
+						id: job.assetId,
+						uri: job.rawPath,
+						kind: job.assetKind,
+						fileName: job.fileName,
+						sizeBytes: 0,
+						durationMicros: job.assetDurationMicros,
+						width: 0,
+						height: 0,
+						rotationDegrees: 0,
+						hasAudio: true,
+						codec: "",
+						frameRate: null,
+					} satisfies MediaHandle,
+					opts: { modelSize: "tiny" },
+				})) {
+					segments.push(segment);
+				}
+				transcriptBySource.set(job.rawPath, segments);
+			} catch (error) {
+				// One unreadable/undecodable source must not lose the rest of
+				// the timeline's captions — collect and continue.
+				failures.push(
+					`${job.fileName}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				transcriptBySource.set(job.rawPath, []);
+				continue;
+			}
+		}
+
+		const windowed = windowSegmentsToClip({
+			segments,
+			trimStartMicros: job.trimStartMicros,
+			durationMicros: job.windowMicros,
+		});
+		allElements.push(
+			...buildCaptionElementsFromTranscript({
+				segments: windowed,
+				timelineStartTime: job.timelineStartTime,
+				stylePresetId,
+			}),
+		);
 	}
 
-	const windowed = windowSegmentsToClip({
-		segments,
-		trimStartMicros: Math.round(mediaTimeToSeconds({ time: target.trimStart }) * 1_000_000),
-		durationMicros: Math.round(mediaTimeToSeconds({ time: target.duration }) * 1_000_000),
-	});
+	if (allElements.length === 0 && failures.length === jobs.length && failures.length > 0) {
+		throw new Error(`Transcription failed: ${failures[0]}`);
+	}
 
-	const elements = inheritSharedCaptionParams({
-		editor,
-		elements: buildCaptionElementsFromTranscript({
-			segments: windowed,
-			timelineStartTime: target.startTime,
-			stylePresetId,
-		}),
-	});
+	const elements = inheritSharedCaptionParams({ editor, elements: allElements });
 	const inserted = insertGeneratedCaptions({ editor, elements });
 	if (!inserted) {
 		// Round 21.1: an empty result must SAY so — the device bug shipped a
 		// single empty token and the panel silently reported "done" with
 		// nothing inserted.
 		throw new Error(
-			"No speech was detected in this clip's audio. If the clip definitely has speech, check the language setting.",
+			"No speech was detected anywhere on the timeline. If your clips definitely have speech, check the language setting.",
 		);
 	}
 	return inserted;

@@ -34,7 +34,8 @@
 		"./selection": "./src/selection/editor-selection.ts",
 		"./*": "./src/*",
 		"./media/waveform-summary": "./src/media/waveform-summary.ts",
-		"./services/waveform-cache": "./src/services/waveform-cache/service.ts"
+		"./services/waveform-cache": "./src/services/waveform-cache/service.ts",
+		"./media/native-paths": "./src/media/native-paths.ts"
 	},
 	"scripts": {
 		"check-types": "tsc --project tsconfig.json --noEmit",

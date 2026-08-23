@@ -518,12 +518,42 @@ async function driveAndSample({
 		exportDetail = error instanceof Error ? error.message : String(error);
 	}
 
+	// CAPTIONS (round 30): whole-timeline transcription. The planted VIDEO's
+	// audio is a pure sine tone (no speech); the planted AUDIO-track clip is
+	// real synthesized SPEECH — so any caption appearing at all proves the
+	// generator processed beyond the main track's first clip (the old
+	// single-clip behavior returned "No speech was detected" on exactly this
+	// timeline shape — the founder's screenshot, 2026-08-23). Runs the REAL
+	// on-device recognizer (iOS 26 SpeechAnalyzer / SFSpeech fallback).
+	let captionsOk = false;
+	let captionsDetail = "not-run";
+	try {
+		const { generateCaptions, getAllCaptions } = await import("@kneecap/mobile-ui");
+		const timeoutMs = 240_000; // first run may download a locale model
+		const result = await Promise.race([
+			generateCaptions({ editor, stylePresetId: "simple" }),
+			new Promise<never>((_, reject) =>
+				setTimeout(() => reject(new Error(`captions timed out after ${timeoutMs}ms`)), timeoutMs),
+			),
+		]);
+		const captions = getAllCaptions({ editor });
+		const words = captions
+			.flatMap(({ element }) => element.words.map((w) => w.text))
+			.join(" ");
+		captionsOk = result !== null && captions.length > 0;
+		captionsDetail = captionsOk
+			? `ok(${captions.length} pages, "${words.slice(0, 60)}")`
+			: "generated null / zero captions";
+	} catch (error) {
+		captionsDetail = error instanceof Error ? error.message : String(error);
+	}
+
 	const timelineOk = scroll0 >= 0 && scroll1 > scroll0;
 	const soundOk = rmsMax > 0.0005;
 	const pass =
-		advanced && decoded && fontsOk && audioOk && timelineOk && selectOk && soundOk && exportOk;
+		advanced && decoded && fontsOk && audioOk && timelineOk && selectOk && soundOk && exportOk && captionsOk;
 	log(
-		`VERDICT phase=${phase} ${pass ? "PASS" : "FAIL"} advanced=${advanced} sinks=${stats.totalSinks} decodedFrames=${stats.cachedFrames} fonts=${fontsOk ? "ok" : "FAIL"} audio=${audioOk ? `ok(${audio.routedNatively ? "native" : "web"})` : `FAIL(${audio.contextState},routed=${audio.routedNatively},clips=${audio.scheduledClips},active=${audio.activeClips},sinks=${audio.activeSinks},failed=${audio.failedSinks},buffers=${audio.decodedBuffers})`} timeline=${timelineOk ? `ok(${scroll0}->${scroll1}px)` : `FAIL(${scroll0}->${scroll1}px)`} select=${selectOk ? `ok(${selectDetail})` : `FAIL(${selectDetail})`} export=${exportOk ? `ok(${exportDetail})` : `FAIL(${exportDetail})`} sound=${soundOk ? `ok(rms=${rmsMax.toFixed(4)})` : `FAIL(rms=${rmsMax.toFixed(4)},queued=${audio.queuedSources},AudioDecoder=${typeof (globalThis as { AudioDecoder?: unknown }).AudioDecoder !== "undefined"})`} lit=${lit.toFixed(3)} (t ${String(t0)} -> ${String(t1)})`,
+		`VERDICT phase=${phase} ${pass ? "PASS" : "FAIL"} advanced=${advanced} sinks=${stats.totalSinks} decodedFrames=${stats.cachedFrames} fonts=${fontsOk ? "ok" : "FAIL"} audio=${audioOk ? `ok(${audio.routedNatively ? "native" : "web"})` : `FAIL(${audio.contextState},routed=${audio.routedNatively},clips=${audio.scheduledClips},active=${audio.activeClips},sinks=${audio.activeSinks},failed=${audio.failedSinks},buffers=${audio.decodedBuffers})`} timeline=${timelineOk ? `ok(${scroll0}->${scroll1}px)` : `FAIL(${scroll0}->${scroll1}px)`} select=${selectOk ? `ok(${selectDetail})` : `FAIL(${selectDetail})`} export=${exportOk ? `ok(${exportDetail})` : `FAIL(${exportDetail})`} captions=${captionsOk ? captionsDetail : `FAIL(${captionsDetail})`} sound=${soundOk ? `ok(rms=${rmsMax.toFixed(4)})` : `FAIL(rms=${rmsMax.toFixed(4)},queued=${audio.queuedSources},AudioDecoder=${typeof (globalThis as { AudioDecoder?: unknown }).AudioDecoder !== "undefined"})`} lit=${lit.toFixed(3)} (t ${String(t0)} -> ${String(t1)})`,
 	);
 }
 

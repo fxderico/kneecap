@@ -90,8 +90,8 @@ export function CaptionsPanel({ editor, onClose, onInserted, selectedCaption }: 
 	return (
 		<PanelSheet onScrimClick={onClose} header={<SheetHeader onClose={onClose} />}>
 			<p className="cc-panel-note">
-				Generate transcribes your clip&apos;s audio on this device (zero network, zero cloud)
-				— the selected clip, or the first clip on the main track. Trims are respected.
+				Generate transcribes audio from your whole timeline on this device (zero
+				network, zero cloud) — every clip and voiceover, with trims respected.
 			</p>
 			{selectedCaption && (
 				<div className="cc-param-row">
