@@ -94,4 +94,66 @@ public enum MediaSandbox {
 	public static func exportURL(exportId: String) throws -> URL {
 		try exportsDirectory().appendingPathComponent("\(exportId).mp4")
 	}
+
+	/// Every finished export is ALSO copied into the Photos library, so the
+	/// container's copy is a second full-resolution video on a device that
+	/// already holds the originals, their proxies and their thumbnails. Left
+	/// unbounded, a few 1080p exports fill the phone — the founder's iPhone
+	/// hit 6.7 MB free and Xcode refused to install (2026-08-23).
+	///
+	/// Keeps the newest `keep` exports (the current one is written after
+	/// this runs, so the most recent finished exports stay shareable from
+	/// the sheet) and deletes the rest. Returns bytes reclaimed. Never
+	/// throws: reclaiming space must not be able to fail an export.
+	@discardableResult
+	public static func pruneOldExports(keep: Int = 2) -> Int64 {
+		guard let directory = try? exportsDirectory() else { return 0 }
+		let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+		guard let entries = try? FileManager.default.contentsOfDirectory(
+			at: directory,
+			includingPropertiesForKeys: keys,
+			options: [.skipsHiddenFiles]
+		) else { return 0 }
+
+		let sorted = entries.sorted { lhs, rhs in
+			let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+				.contentModificationDate ?? .distantPast
+			let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+				.contentModificationDate ?? .distantPast
+			return l > r
+		}
+		var reclaimed: Int64 = 0
+		for url in sorted.dropFirst(max(0, keep)) {
+			let size = Int64(
+				(try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+			)
+			if (try? FileManager.default.removeItem(at: url)) != nil {
+				reclaimed += size
+			}
+		}
+		if reclaimed > 0 {
+			print("[kneecap-storage] pruned old exports, reclaimed \(reclaimed / 1_048_576) MB")
+		}
+		return reclaimed
+	}
+
+	/// Bytes currently held under the custody root, by bucket — for the
+	/// storage diagnostics logged before each export.
+	public static func usageReport() -> String {
+		guard let root = try? rootDirectory() else { return "custody root unavailable" }
+		var parts: [String] = []
+		for bucket in ["Media", "Proxies", "Thumbnails", "Exports"] {
+			let dir = root.appendingPathComponent(bucket, isDirectory: true)
+			guard let enumerator = FileManager.default.enumerator(
+				at: dir,
+				includingPropertiesForKeys: [.fileSizeKey]
+			) else { continue }
+			var total: Int64 = 0
+			for case let url as URL in enumerator {
+				total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+			}
+			parts.append("\(bucket) \(total / 1_048_576)MB")
+		}
+		return parts.joined(separator: ", ")
+	}
 }

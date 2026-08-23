@@ -83,6 +83,12 @@ extension NativeBridgePlugin {
             do {
                 self.emitExportProgress(exportId: exportId, stage: "preparing", fraction: 0)
 
+                // Reclaim space BEFORE writing a new export: the container
+                // keeps a full copy of every export alongside the one in
+                // Photos, and an unbounded pile of them fills the device.
+                MediaSandbox.pruneOldExports()
+                print("[kneecap-storage] custody usage: \(MediaSandbox.usageReport())")
+
                 let outputURL = try MediaSandbox.exportURL(exportId: exportId)
                 let result = try await EdlExporter.export(
                     edl: edl,
