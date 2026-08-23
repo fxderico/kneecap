@@ -216,20 +216,29 @@ async function runPhase({
 			`import failed: imported=${imported.length} failed=${failed[0]?.error ?? "none"}`,
 		);
 	}
+	// The image is placed AFTER the video so it lands on the MAIN track
+	// (auto placement at an occupied time would push it to an overlay) —
+	// regression coverage for the -11828 "Cannot Open" export failure: a
+	// main-track JPEG fed to AVURLAsset killed every export containing a
+	// photo (founder's device, 2026-08-23; stills now composite build-time).
+	let mainCursorSec = 0;
 	for (const asset of imported) {
 		log(
 			`imported ${asset.type} url=${asset.url} rel=${asset.nativeRelativePath ?? "(none)"}`,
 		);
+		// `||`: image imports probe duration 0 (same rule as actions.ts).
+		const durationSec = asset.duration || 3;
+		const isVisual = asset.type !== "audio";
 		editor.command.execute({
 			command: new InsertElementCommand({
 				element: buildElementFromMedia({
 					mediaId: asset.id,
 					mediaType: asset.type,
 					name: asset.name,
-					// `||`: image imports probe duration 0 (same rule as
-					// actions.ts importAndPlaceMedia).
-					duration: mediaTimeFromSeconds({ seconds: asset.duration || 3 }),
-					startTime: editor.playback.getCurrentTime(),
+					duration: mediaTimeFromSeconds({ seconds: durationSec }),
+					startTime: isVisual
+						? mediaTimeFromSeconds({ seconds: mainCursorSec })
+						: editor.playback.getCurrentTime(),
 				}),
 				// Same per-kind routing as actions.ts: audio files land on an
 				// audio track (importAndPlaceAudio), visual media on video.
@@ -239,6 +248,7 @@ async function runPhase({
 				},
 			}),
 		});
+		if (isVisual) mainCursorSec += durationSec;
 	}
 	log("clips placed on timeline");
 	await editor.project.saveCurrentProject();

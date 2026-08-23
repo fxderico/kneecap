@@ -23,6 +23,15 @@ public struct BuiltComposition {
 	/// track never overlap each other). Image overlay clips have no lane;
 	/// they become `.still` layers in `VideoCompositionBuilder`.
 	public var overlayVideoTrackIDs: [String: CMPersistentTrackID]
+	/// The PACER lane under main-track IMAGE segments (round 28): a still
+	/// has no real media, and `AVAssetReaderVideoCompositionOutput` paces
+	/// composed frames purely by its REQUIRED source tracks' samples — an
+	/// instruction requiring nothing is never scheduled (a trailing photo
+	/// truncated the export; a mid-timeline one would be skipped). This
+	/// lane holds looped 64×64 black filler across every image segment and
+	/// still instructions REQUIRE it; the compositor never reads its
+	/// frames — they only drive the frame clock.
+	public var stillPacerTrackID: CMPersistentTrackID?
 	public var audioMix: AVMutableAudioMix?
 	/// The input EDL with every NON-main-track clip's `startTicks` (and
 	/// `meta.durationTicks`) remapped through
@@ -115,6 +124,13 @@ public enum CompositionBuilder {
 
 		for (i, clip) in sortedMainClips.enumerated() {
 			guard let placement = placementByClipId[clip.clipId], let assetId = clip.assetId else { continue }
+			// IMAGE clips never open as AVURLAssets — a JPEG has no tracks
+			// (-11828 "Cannot Open"/assetProperty_Tracks killed every export
+			// containing a main-track photo, founder's device 2026-08-23).
+			// They keep their placement (the timeline layout stands) but get
+			// no composition lane: VideoCompositionBuilder decodes them once
+			// as stills and the compositor renders them like PiP `.still`s.
+			if clip.kind == "image" { continue }
 			let avAsset = try loadAsset(assetId)
 			let assetTracks = try await avAsset.load(.tracks)
 			let videoTrack = assetTracks.first { $0.mediaType == .video }
@@ -186,6 +202,50 @@ public enum CompositionBuilder {
 				audioParamsFor(index: window.incomingIndex, a: audioParamsA, b: audioParamsB)
 					.setVolumeRamp(fromStartVolume: 0, toEndVolume: inVol, timeRange: windowRange)
 			}
+		}
+
+		// PACER lane for main-track IMAGE segments (see
+		// `BuiltComposition.stillPacerTrackID`): AVAssetReaderVideoComposition-
+		// Output only schedules an instruction while its REQUIRED tracks have
+		// samples — a still segment requiring nothing is never composed (a
+		// trailing photo truncated the export to the video's end; verified in
+		// the sim 2026-08-23, as was the corollary that trailing EMPTY ranges
+		// don't extend the composition's duration). Looped 1s/30fps black
+		// filler under every image segment gives the reader a frame clock;
+		// still instructions require this lane, the compositor never reads it.
+		var stillPacerTrackID: CMPersistentTrackID?
+		let imagePlacements = sortedMainClips.enumerated().compactMap { _, clip -> ClipPlacement? in
+			clip.kind == "image" ? placementByClipId[clip.clipId] : nil
+		}
+		if !imagePlacements.isEmpty {
+			guard let pacerLane = composition.addMutableTrack(
+				withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+				throw CompositionBuilderError.noMainTrack
+			}
+			let filler = try await Self.blackFillerAsset()
+			let fillerTracks = try await filler.load(.tracks)
+			guard let fillerTrack = fillerTracks.first(where: { $0.mediaType == .video }) else {
+				throw CompositionBuilderError.noMainTrack
+			}
+			let fillerDuration = try await filler.load(.duration)
+			for placement in imagePlacements {
+				var cursor = EdlTime.cmTime(ticks: placement.insertStartTicks, ticksPerSecond: tps)
+				let segmentEnd = EdlTime.cmTime(
+					ticks: placement.insertStartTicks + placement.insertDurationTicks,
+					ticksPerSecond: tps
+				)
+				while cursor < segmentEnd {
+					let chunk = CMTimeMinimum(fillerDuration, CMTimeSubtract(segmentEnd, cursor))
+					try pacerLane.insertTimeRange(
+						CMTimeRange(start: .zero, duration: chunk),
+						of: fillerTrack,
+						at: cursor
+					)
+					cursor = CMTimeAdd(cursor, chunk)
+				}
+			}
+			stillPacerTrackID = pacerLane.trackID
+			print("[kneecap-export] still pacer lane \(pacerLane.trackID) covers \(imagePlacements.count) image segment(s); composition=\(composition.duration.seconds)s")
 		}
 
 		// Background-music / secondary audio tracks (`kind == "audio"`):
@@ -314,6 +374,7 @@ public enum CompositionBuilder {
 			mainTrackIDs: mainTrackIDs,
 			transitionWindows: windows,
 			overlayVideoTrackIDs: overlayVideoTrackIDs,
+			stillPacerTrackID: stillPacerTrackID,
 			audioMix: audioMix,
 			remappedEdl: remappedEdl
 		)
@@ -329,6 +390,69 @@ public enum CompositionBuilder {
 
 	static func dbToLinear(_ db: Double) -> Double {
 		pow(10.0, db / 20.0)
+	}
+
+	/// A ~1s, 64×64 black H.264 clip synthesized once per process, used
+	/// ONLY as composition-duration filler under trailing main-track
+	/// stills (see the padding block above). Its frames are never
+	/// composited — still-segment instructions require no source tracks.
+	private static var cachedFillerURL: URL?
+	static func blackFillerAsset() async throws -> AVURLAsset {
+		if let cached = cachedFillerURL, FileManager.default.fileExists(atPath: cached.path) {
+			return AVURLAsset(url: cached)
+		}
+		let url = FileManager.default.temporaryDirectory
+			.appendingPathComponent("kneecap-black-filler-\(ProcessInfo.processInfo.processIdentifier).mp4")
+		try? FileManager.default.removeItem(at: url)
+
+		let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+		let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+			AVVideoCodecKey: AVVideoCodecType.h264,
+			AVVideoWidthKey: 64,
+			AVVideoHeightKey: 64,
+		])
+		input.expectsMediaDataInRealTime = false
+		let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+			assetWriterInput: input,
+			sourcePixelBufferAttributes: [
+				kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+				kCVPixelBufferWidthKey as String: 64,
+				kCVPixelBufferHeightKey as String: 64,
+			]
+		)
+		guard writer.canAdd(input) else {
+			throw CompositionBuilderError.noMainTrack
+		}
+		writer.add(input)
+		guard writer.startWriting() else {
+			throw writer.error ?? CompositionBuilderError.noMainTrack
+		}
+		writer.startSession(atSourceTime: .zero)
+
+		var pixelBuffer: CVPixelBuffer?
+		CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixelBuffer)
+		guard let buffer = pixelBuffer else {
+			throw CompositionBuilderError.noMainTrack
+		}
+		CVPixelBufferLockBaseAddress(buffer, [])
+		if let base = CVPixelBufferGetBaseAddress(buffer) {
+			memset(base, 0, CVPixelBufferGetDataSize(buffer))
+		}
+		CVPixelBufferUnlockBaseAddress(buffer, [])
+
+		// 1s at 30fps — real sample density matters: the reader's composed-
+		// frame cadence follows source sample timing (see the padding block).
+		for frame in 0..<30 {
+			while !input.isReadyForMoreMediaData {
+				try await Task.sleep(nanoseconds: 5_000_000)
+			}
+			adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: 30))
+		}
+		input.markAsFinished()
+		await writer.finishWriting()
+		if let error = writer.error { throw error }
+		cachedFillerURL = url
+		return AVURLAsset(url: url)
 	}
 }
 

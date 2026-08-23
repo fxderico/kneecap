@@ -201,6 +201,16 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 
 	public let primaryTrackID: CMPersistentTrackID
 	public let secondaryTrackID: CMPersistentTrackID
+	/// Build-time-decoded STILL sources (round 28): a main-track IMAGE clip
+	/// has no composition lane — a JPEG can't open as an AVURLAsset (the
+	/// -11828 "Cannot Open"/assetProperty_Tracks export failure on device,
+	/// 2026-08-23) — so its frames come from a decoded CIImage instead,
+	/// exactly like the PiP `.still` overlay path. Set only when the
+	/// matching trackID is `kCMPersistentTrackID_Invalid`. Both nil AND an
+	/// invalid primary track ⇒ a background-only segment (unreadable image
+	/// degrades to canvas background instead of failing the whole export).
+	public let primaryStill: CIImage?
+	public let secondaryStill: CIImage?
 	/// `nil` for a plain single-source instruction. When set (both together,
 	/// always), describes the cross-fade window this instruction's
 	/// `timeRange` falls entirely inside, already converted to `CMTime` at
@@ -242,6 +252,13 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		timeRange: CMTimeRange,
 		primaryTrackID: CMPersistentTrackID,
 		secondaryTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid,
+		primaryStill: CIImage? = nil,
+		secondaryStill: CIImage? = nil,
+		/// The still-pacer lane (BuiltComposition.stillPacerTrackID): listed
+		/// in requiredSourceTrackIDs so the reader SCHEDULES this
+		/// instruction's frames — an instruction requiring no tracks is
+		/// never composed. The compositor never reads its frames.
+		pacerTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid,
 		transitionWindowStart: CMTime? = nil,
 		transitionWindowDuration: CMTime? = nil,
 		transitionKind: String? = nil,
@@ -258,6 +275,8 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		self.timeRange = timeRange
 		self.primaryTrackID = primaryTrackID
 		self.secondaryTrackID = secondaryTrackID
+		self.primaryStill = primaryStill
+		self.secondaryStill = secondaryStill
 		self.transitionWindowStart = transitionWindowStart
 		self.transitionWindowDuration = transitionWindowDuration
 		self.transitionKind = transitionKind
@@ -270,7 +289,8 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		self.backgroundColor = backgroundColor
 		self.overlayVideoLayers = overlayVideoLayers
 		self.overlayBillboards = overlayBillboards
-		self.containsTweening = secondaryTrackID != kCMPersistentTrackID_Invalid
+		self.containsTweening =
+			secondaryTrackID != kCMPersistentTrackID_Invalid || secondaryStill != nil
 		// `requiredSourceTrackIDs` is typed `[NSValue]?`, but AVFoundation's
 		// OWN validation (`-[AVVideoComposition
 		// isValidForTracks:assetDuration:timeRange:validationDelegate:]`)
@@ -282,7 +302,7 @@ public final class EdlVideoCompositionInstruction: NSObject, AVVideoCompositionI
 		// construction is a bare `NSNumber`, upcast to `NSValue` for the
 		// array's declared element type via inheritance, not a second
 		// `NSValue` layer wrapping one.
-		self.requiredSourceTrackIDs = ([primaryTrackID, secondaryTrackID] + overlayVideoLayers.compactMap(\.trackID))
+		self.requiredSourceTrackIDs = ([primaryTrackID, secondaryTrackID, pacerTrackID] + overlayVideoLayers.compactMap(\.trackID))
 			.filter { $0 != kCMPersistentTrackID_Invalid }
 			.map { NSNumber(value: $0) as NSValue }
 		super.init()
@@ -320,13 +340,22 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 				))
 				return
 			}
-			guard let primaryBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: instruction.primaryTrackID) else {
-				asyncVideoCompositionRequest.finish(with: NSError(
-					domain: "app.kneecap.export",
-					code: -2,
-					userInfo: [NSLocalizedDescriptionKey: "no primary source frame at track \(instruction.primaryTrackID)"]
-				))
-				return
+			// Primary source: a composition-lane frame (video), a build-time
+			// still (main-track image — see `primaryStill`'s doc comment), or
+			// nothing (background-only segment).
+			let primarySource: CIImage?
+			if instruction.primaryTrackID != kCMPersistentTrackID_Invalid {
+				guard let primaryBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: instruction.primaryTrackID) else {
+					asyncVideoCompositionRequest.finish(with: NSError(
+						domain: "app.kneecap.export",
+						code: -2,
+						userInfo: [NSLocalizedDescriptionKey: "no primary source frame at track \(instruction.primaryTrackID)"]
+					))
+					return
+				}
+				primarySource = CIImage(cvPixelBuffer: primaryBuffer)
+			} else {
+				primarySource = instruction.primaryStill
 			}
 
 			// The render frame is renderContext.size (== composition.renderSize),
@@ -340,22 +369,32 @@ public final class EdlTransitionCompositor: NSObject, AVVideoCompositing {
 			let renderRect = CGRect(origin: .zero, size: renderSize)
 			let background = CIImage(color: instruction.backgroundColor).cropped(to: renderRect)
 
-			var image = CIImage(cvPixelBuffer: primaryBuffer)
-			if let brightness = instruction.primaryBrightness {
-				image = image.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
+			var image: CIImage
+			if var primaryImage = primarySource {
+				if let brightness = instruction.primaryBrightness {
+					primaryImage = primaryImage.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
+				}
+				if let adjust = instruction.primaryAdjust {
+					primaryImage = adjust.apply(to: primaryImage, renderSize: renderSize)
+				}
+				image = Self.place(
+					image: primaryImage,
+					placement: instruction.primaryPlacement,
+					renderSize: renderSize
+				).composited(over: background)
+			} else {
+				image = background
 			}
-			if let adjust = instruction.primaryAdjust {
-				image = adjust.apply(to: image, renderSize: renderSize)
-			}
-			image = Self.place(
-				image: image,
-				placement: instruction.primaryPlacement,
-				renderSize: renderSize
-			).composited(over: background)
 
-			if instruction.secondaryTrackID != kCMPersistentTrackID_Invalid,
-			   let secondaryBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: instruction.secondaryTrackID) {
-				var secondaryImage = CIImage(cvPixelBuffer: secondaryBuffer)
+			let secondarySource: CIImage?
+			if instruction.secondaryTrackID != kCMPersistentTrackID_Invalid {
+				secondarySource = asyncVideoCompositionRequest
+					.sourceFrame(byTrackID: instruction.secondaryTrackID)
+					.map { CIImage(cvPixelBuffer: $0) }
+			} else {
+				secondarySource = instruction.secondaryStill
+			}
+			if var secondaryImage = secondarySource {
 				if let brightness = instruction.secondaryBrightness {
 					secondaryImage = secondaryImage.applyingFilter("CIColorControls", parameters: ["inputBrightness": brightness])
 				}

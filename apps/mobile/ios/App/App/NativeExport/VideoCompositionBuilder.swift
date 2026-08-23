@@ -150,6 +150,32 @@ public enum VideoCompositionBuilder {
 			billboards.filter { $0.timeRange.intersection(range).duration.seconds > 0 }
 		}
 
+		// --- Main-track IMAGE clips (round 28): no composition lane exists
+		// for them (CompositionBuilder skips stills — a JPEG can't open as
+		// an AVURLAsset), so their segments render from a build-time-decoded
+		// CIImage, the same way PiP image overlays already work. Decoded
+		// lazily, once per clip. An unreadable image logs and renders as
+		// canvas background instead of failing the export. ---
+		var mainClipById: [String: EdlClip] = [:]
+		for track in edl.tracks where track.kind == "main" {
+			for clip in track.clips { mainClipById[clip.clipId] = clip }
+		}
+		var mainStillCache: [String: CIImage?] = [:]
+		func mainStill(_ clipId: String) -> CIImage? {
+			if let cached = mainStillCache[clipId] { return cached }
+			var still: CIImage? = nil
+			if let clip = mainClipById[clipId], clip.kind == "image",
+			   let assetId = clip.assetId, let edlAsset = assetById[assetId],
+			   let url = resolveAssetURL?(edlAsset) {
+				still = Self.loadStillImage(url: url)
+			}
+			if still == nil {
+				print("[kneecap-export] main-track image clip \(clipId): asset unreadable, rendering background")
+			}
+			mainStillCache[clipId] = still
+			return still
+		}
+
 		// --- Build the sorted, contiguous instruction segments ---
 		struct Segment {
 			var startTicks: Int64
@@ -160,11 +186,18 @@ public enum VideoCompositionBuilder {
 
 		for placement in built.mainPlacements {
 			let solo = placement.soloRange
-			guard solo.end > solo.start, let trackID = built.mainTrackIDs[placement.clipId] else { continue }
+			guard solo.end > solo.start else { continue }
+			let trackID = built.mainTrackIDs[placement.clipId]
+			let still = trackID == nil ? mainStill(placement.clipId) : nil
 			let range = EdlTime.cmTimeRange(startTicks: solo.start, durationTicks: solo.end - solo.start, ticksPerSecond: tps)
 			let instruction = EdlVideoCompositionInstruction(
 				timeRange: range,
-				primaryTrackID: trackID,
+				primaryTrackID: trackID ?? kCMPersistentTrackID_Invalid,
+				primaryStill: still,
+				pacerTrackID:
+					still != nil
+						? (built.stillPacerTrackID ?? kCMPersistentTrackID_Invalid)
+						: kCMPersistentTrackID_Invalid,
 				primaryBrightness: enabledBrightness(placement.clipId),
 				primaryAdjust: enabledAdjust(placement.clipId),
 				primaryPlacement: sourcePlacement(placement.clipId),
@@ -180,13 +213,24 @@ public enum VideoCompositionBuilder {
 			guard window.outgoingIndex < sortedClipIds.count, window.incomingIndex < sortedClipIds.count else { continue }
 			let outgoingId = sortedClipIds[window.outgoingIndex]
 			let incomingId = sortedClipIds[window.incomingIndex]
-			guard let primaryTrackID = built.mainTrackIDs[outgoingId],
-				  let secondaryTrackID = built.mainTrackIDs[incomingId] else { continue }
+			// Either side of a transition may be a still (image clip): its
+			// track ID stays invalid and the frame comes from primaryStill/
+			// secondaryStill instead — the blend path is source-agnostic.
+			let primaryTrackID = built.mainTrackIDs[outgoingId]
+			let secondaryTrackID = built.mainTrackIDs[incomingId]
+			let primaryStill = primaryTrackID == nil ? mainStill(outgoingId) : nil
+			let secondaryStill = secondaryTrackID == nil ? mainStill(incomingId) : nil
 			let range = EdlTime.cmTimeRange(startTicks: window.startTicks, durationTicks: window.durationTicks, ticksPerSecond: tps)
 			let instruction = EdlVideoCompositionInstruction(
 				timeRange: range,
-				primaryTrackID: primaryTrackID,
-				secondaryTrackID: secondaryTrackID,
+				primaryTrackID: primaryTrackID ?? kCMPersistentTrackID_Invalid,
+				secondaryTrackID: secondaryTrackID ?? kCMPersistentTrackID_Invalid,
+				primaryStill: primaryStill,
+				secondaryStill: secondaryStill,
+				pacerTrackID:
+					primaryStill != nil || secondaryStill != nil
+						? (built.stillPacerTrackID ?? kCMPersistentTrackID_Invalid)
+						: kCMPersistentTrackID_Invalid,
 				transitionWindowStart: range.start,
 				transitionWindowDuration: range.duration,
 				transitionKind: window.kind,
