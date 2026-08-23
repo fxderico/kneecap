@@ -62,6 +62,28 @@ final class NativeAudioPreview {
 		let engine = AVAudioEngine()
 		self.engine = engine
 
+		// MIX BUS → LIMITER → main mixer (round 39). Per-clip gain reaches
+		// +20 dB (1000% volume), so the sum routinely exceeds full scale;
+		// without limiting that hard-clips and tears — the founder's "audio
+		// rips when I do 1000x". Apple's peak limiter rounds those peaks off
+		// instead. An effect node has ONE input bus, so the players are
+		// summed by a mixer first. Matches the export's `softLimit`, which
+		// applies the same protection to the encoded file.
+		let mixBus = AVAudioMixerNode()
+		engine.attach(mixBus)
+		let limiter = AVAudioUnitEffect(
+			audioComponentDescription: AudioComponentDescription(
+				componentType: kAudioUnitType_Effect,
+				componentSubType: kAudioUnitSubType_PeakLimiter,
+				componentManufacturer: kAudioUnitManufacturer_Apple,
+				componentFlags: 0,
+				componentFlagsMask: 0
+			)
+		)
+		engine.attach(limiter)
+		engine.connect(mixBus, to: limiter, format: nil)
+		engine.connect(limiter, to: engine.mainMixerNode, format: nil)
+
 		var scheduled: [(player: AVAudioPlayerNode, file: AVAudioFile, clip: ClipSchedule, playOffsetInClip: Double)] = []
 
 		for clip in clips {
@@ -103,7 +125,7 @@ final class NativeAudioPreview {
 				engine.connect(lastNode, to: gain, format: file.processingFormat)
 				lastNode = gain
 			}
-			engine.connect(lastNode, to: engine.mainMixerNode, format: file.processingFormat)
+			engine.connect(lastNode, to: mixBus, format: file.processingFormat)
 			player.volume = 1
 
 			scheduled.append((player, file, clip, playOffsetInClip))

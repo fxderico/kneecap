@@ -126,7 +126,21 @@ public enum EdlExporter {
 		let audioTracks = composition.tracks(withMediaType: .audio)
 		var audioOutput: AVAssetReaderAudioMixOutput?
 		if edl.output.includeAudio, !audioTracks.isEmpty {
-			let out = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: nil)
+			// LINEAR PCM, not passthrough (round 39): boosting a clip past
+			// 0 dBFS (the volume slider reaches 1000% / +20 dB) makes the
+			// summed mix exceed full scale, and an unlimited encode turns
+			// that into hard digital clipping — the "audio rips at 1000x"
+			// the founder heard. Decoding to float here lets `softLimit`
+			// below round the peaks off before the AAC encoder sees them.
+			let out = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: [
+				AVFormatIDKey: kAudioFormatLinearPCM,
+				AVLinearPCMBitDepthKey: 32,
+				AVLinearPCMIsFloatKey: true,
+				AVLinearPCMIsNonInterleaved: false,
+				AVLinearPCMIsBigEndianKey: false,
+				AVSampleRateKey: 44100,
+				AVNumberOfChannelsKey: 2,
+			])
 			out.audioMix = built.audioMix
 			out.alwaysCopiesSampleData = false
 			if reader.canAdd(out) {
@@ -193,6 +207,8 @@ public enum EdlExporter {
 			print("[kneecap-export] video composition: \(videoComposition.instructions.count) instruction(s) covering \(covered.start.seconds)s–\(covered.end.seconds)s of \(composition.duration.seconds)s, renderSize=\(Int(videoComposition.renderSize.width))x\(Int(videoComposition.renderSize.height))")
 		}
 
+		resetLimiter()
+
 		guard reader.startReading() else {
 			throw EdlExportError.readerFailed(reader.error?.localizedDescription ?? "unknown")
 		}
@@ -238,6 +254,7 @@ public enum EdlExporter {
 							reader: reader,
 							readerOutput: audioOutput,
 							writerInput: audioWriterInput,
+							isAudio: true,
 							handle: handle,
 							queueLabel: "app.kneecap.export.audio",
 							progressWeight: nil,
@@ -261,6 +278,12 @@ public enum EdlExporter {
 			try? FileManager.default.removeItem(at: outputURL)
 			throw EdlExportError.cancelled
 		}
+
+		limiterStateLock.lock()
+		let peakSeen = limiterPeakSeen
+		let buffersSeen = limiterBuffersSeen
+		limiterStateLock.unlock()
+		print("[kneecap-audio] limiter saw \(buffersSeen) buffer(s), peak \(peakSeen) (1.0 = full scale)")
 
 		await writer.finishWriting()
 		if writer.status != .completed {
@@ -304,10 +327,101 @@ public enum EdlExporter {
 	/// no manual pixel-buffer rendering: the video composition already
 	/// happened inside `AVAssetReaderVideoCompositionOutput` before this
 	/// function ever sees a sample buffer.
+
+	/// A real feed-forward peak LIMITER over the export's float PCM.
+	///
+	/// The volume control reaches 1000% (+20 dB), so the summed mix can run
+	/// far past full scale — measured 7.5× on a boosted clip. Anything that
+	/// merely ceilings those samples (an encoder's clamp, or a soft knee
+	/// with only 1 dB of headroom) squares the waveform off, which is the
+	/// tearing the founder heard: "audio rips when i do 1000x".
+	///
+	/// This instead REDUCES GAIN so the peaks fit, preserving the waveform's
+	/// shape: a fast-attack / slow-release envelope follower drives a gain
+	/// that settles at `ceiling / peak`, so a 7.5× signal plays at full
+	/// scale and still sounds like the recording, just loud. State persists
+	/// across buffers (an export is one continuous stream) and is reset per
+	/// export by `resetLimiter()`.
+	static func softLimit(sampleBuffer: CMSampleBuffer) {
+		guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+		var lengthAtOffset = 0
+		var totalLength = 0
+		var pointer: UnsafeMutablePointer<Int8>?
+		guard CMBlockBufferGetDataPointer(
+			block,
+			atOffset: 0,
+			lengthAtOffsetOut: &lengthAtOffset,
+			totalLengthOut: &totalLength,
+			dataPointerOut: &pointer
+		) == kCMBlockBufferNoErr, let pointer else { return }
+
+		let ceiling: Float = 0.95           // ~-0.45 dBFS, leaves AAC headroom
+		let attack: Float = 0.9985          // ~1 ms at 44.1 kHz
+		let release: Float = 0.99995        // ~150 ms
+		var observedPeak: Float = 0
+		let count = totalLength / MemoryLayout<Float>.size
+
+		limiterStateLock.lock()
+		var envelope = limiterEnvelope
+		var gain = limiterGain
+		limiterStateLock.unlock()
+
+		pointer.withMemoryRebound(to: Float.self, capacity: count) { samples in
+			for index in 0..<count {
+				let value = samples[index]
+				guard value.isFinite else { samples[index] = 0; continue }
+				let magnitude = abs(value)
+				observedPeak = max(observedPeak, magnitude)
+
+				// Envelope: jump up fast, fall back slowly.
+				envelope = magnitude > envelope
+					? attack * envelope + (1 - attack) * magnitude
+					: release * envelope + (1 - release) * magnitude
+
+				let target = envelope > ceiling ? ceiling / envelope : 1
+				gain = target < gain
+					? attack * gain + (1 - attack) * target
+					: release * gain + (1 - release) * target
+
+				let limited = value * gain
+				// Final safety for the rare inter-sample overshoot the
+				// smoothing lets through.
+				samples[index] = min(ceiling, max(-ceiling, limited))
+			}
+		}
+
+		limiterStateLock.lock()
+		limiterEnvelope = envelope
+		limiterGain = gain
+		limiterPeakSeen = max(limiterPeakSeen, observedPeak)
+		limiterBuffersSeen += 1
+		limiterStateLock.unlock()
+	}
+
+	/// Fresh limiter state per export — leftover gain reduction from a
+	/// previous run would duck the first second of the next one.
+	static func resetLimiter() {
+		limiterStateLock.lock()
+		limiterEnvelope = 0
+		limiterGain = 1
+		limiterPeakSeen = 0
+		limiterBuffersSeen = 0
+		limiterStateLock.unlock()
+	}
+
+	nonisolated(unsafe) static var limiterEnvelope: Float = 0
+	nonisolated(unsafe) static var limiterGain: Float = 1
+	static let limiterStateLock = NSLock()
+
+	/// Diagnostics: the peak the encoder would have received unlimited.
+	nonisolated(unsafe) static var limiterPeakSeen: Float = 0
+	nonisolated(unsafe) static var limiterBuffersSeen = 0
+
 	private static func runPhase(
 		reader: AVAssetReader,
 		readerOutput: AVAssetReaderOutput,
 		writerInput: AVAssetWriterInput,
+		isAudio: Bool = false,
 		handle: EdlExportHandle,
 		queueLabel: String,
 		progressWeight: Double?,
@@ -348,6 +462,7 @@ public enum EdlExporter {
 							: nil)
 						return
 					}
+						if isAudio { Self.softLimit(sampleBuffer: sampleBuffer) }
 					guard writerInput.append(sampleBuffer) else {
 						writerInput.markAsFinished()
 						finish(EdlExportError.writerFailed("append failed"))

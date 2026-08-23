@@ -49,7 +49,7 @@ import {
 	type NativeMediaSource,
 } from "@kneecap/editor-core";
 import { buildElementFromMedia, buildTextElement } from "@kneecap/editor-core/timeline";
-import { InsertElementCommand } from "@kneecap/editor-core/commands";
+import { InsertElementCommand, UpdateElementsCommand } from "@kneecap/editor-core/commands";
 import { loadFontAtlas } from "@kneecap/editor-core/fonts/local-fonts";
 import { EditorShell, ensurePreviewGpu } from "@kneecap/mobile-ui";
 import { getNativeBridge } from "@kneecap/native-bridge";
@@ -298,6 +298,31 @@ async function runPhase({
 		}),
 	});
 	log("text overlay placed (fontSize 15, border 2%)");
+
+	// AUDIO AT +20 dB / 1000% (round 39 regression coverage): the volume
+	// slider reaches 1000%, and an unlimited encode turns the resulting
+	// over-full-scale sum into hard clipping — "audio rips when i do 1000x".
+	// The runner measures the exported waveform for flat-topped (clipped)
+	// samples; a limited mix has none.
+	{
+		const scene = editor.scenes.getActiveScene();
+		const audioTrack = scene.tracks.audio[0];
+		const audioElement = audioTrack?.elements[0];
+		if (audioTrack && audioElement) {
+			editor.command.execute({
+				command: new UpdateElementsCommand({
+					updates: [
+						{
+							trackId: audioTrack.id,
+							elementId: audioElement.id,
+							patch: { params: { ...audioElement.params, volume: 20 } },
+						},
+					],
+				}),
+			});
+			log("audio boosted to +20 dB (1000%) for the limiter check");
+		}
+	}
 
 	log("clips placed on timeline");
 	await editor.project.saveCurrentProject();
