@@ -23,7 +23,12 @@ import { roundMediaTime } from "@/wasm";
 
 type InsertElementPlacement =
 	| { mode: "explicit"; trackId: string }
-	| { mode: "auto"; trackType?: TrackType; insertIndex?: number };
+	| { mode: "auto"; trackType?: TrackType; insertIndex?: number }
+	/** Always creates a FRESH track of `trackType` (placement strategy
+	 *  `alwaysNew`) — the overlay-media insert needs this: `auto` would
+	 *  happily land a picture-in-picture clip on the MAIN track whenever
+	 *  the playhead sits over empty main space. */
+	| { mode: "newTrack"; trackType: TrackType; position?: "highest" | "default" };
 
 export interface InsertElementParams {
 	element: CreateTimelineElement;
@@ -225,7 +230,7 @@ export class InsertElementCommand extends Command {
 		const placement = this.placement;
 
 		if (
-			placement.mode === "auto" &&
+			(placement.mode === "auto" || placement.mode === "newTrack") &&
 			placement.trackType &&
 			!canElementGoOnTrack({
 				elementType: element.type,
@@ -240,7 +245,8 @@ export class InsertElementCommand extends Command {
 
 		const placementResult = resolveTrackPlacement({
 			tracks,
-			...(placement.mode === "auto" && placement.trackType
+			...((placement.mode === "auto" || placement.mode === "newTrack") &&
+			placement.trackType
 				? { trackType: placement.trackType }
 				: { elementType: element.type }),
 			timeSpans: [
@@ -252,7 +258,9 @@ export class InsertElementCommand extends Command {
 			strategy:
 				placement.mode === "explicit"
 					? { type: "explicit", trackId: placement.trackId }
-					: { type: "firstAvailable" },
+					: placement.mode === "newTrack"
+						? { type: "alwaysNew", position: placement.position ?? "default" }
+						: { type: "firstAvailable" },
 		});
 		if (!placementResult) {
 			if (placement.mode === "explicit") {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { TICKS_PER_SECOND } from "@kneecap/editor-core";
+import { TICKS_PER_SECOND, type EditorCore, type NativeImportProgress } from "@kneecap/editor-core";
 import { cn } from "../../lib/cn";
 import { isVisualElement, type VisualElement } from "@kneecap/editor-core/timeline";
 import { TopBar } from "./top-bar";
@@ -39,7 +39,7 @@ import {
 	toggleReversed,
 	selectElement,
 	insertTextElement,
-	insertOverlayShape,
+	importAndPlaceOverlay,
 	setMainTrackTransition,
 	togglePlayback,
 	seekToSeconds,
@@ -193,6 +193,43 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 		setChromeError(error instanceof Error ? error.message : String(error));
 	};
 
+	/** Shared picker→custody→proxy import flow with the ProgressOverlay —
+	 *  the "+" button (main track) and the Overlay panel (PiP tracks) run
+	 *  the EXACT same mechanism, differing only in where clips land. */
+	const runMediaImport = (
+		importer: (args: {
+			editor: EditorCore;
+			onProgress: (p: NativeImportProgress) => void;
+		}) => Promise<number>,
+	) => {
+		if (importProgress) return; // one import at a time
+		setChromeError(null);
+		// Indeterminate 0% while the OS picker is up; the picker sheet
+		// covers it, and a cancelled pick clears it in `finally`.
+		setImportProgress({ percent: 0, label: "Choosing media…" });
+		importer({
+			editor,
+			onProgress: (p) => {
+				const overall =
+					((p.index + Math.min(1, Math.max(0, p.fraction))) /
+						Math.max(1, p.total)) *
+					100;
+				// "picking" = post-pick load/copy, which for iCloud-stored
+				// originals is a real download — name it, or minutes of it
+				// read as a hang.
+				const label =
+					p.stage === "picking"
+						? `Preparing media ${p.index + 1} of ${p.total}…`
+						: p.total > 1
+							? `Importing ${p.index + 1} of ${p.total}…`
+							: `Importing ${p.fileName}…`;
+				setImportProgress({ percent: Math.round(overall), label });
+			},
+		})
+			.catch(reportChromeError)
+			.finally(() => setImportProgress(null));
+	};
+
 	useEffect(() => {
 		(bootstrap ?? bootstrapDemoProject)().then(() => setReady(true));
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- `bootstrap`/`bootstrapDemoProject` are meant to run exactly once per mount (the demo bootstrap is itself idempotent via its own module-level cache — see demo-project.ts — and re-running a real caller's bootstrap on every render would be wrong, not just wasteful); depending on `bootstrap` would re-run this whenever a caller passes a fresh closure identity, which apps/mobile's own memoized `NOOP_BOOTSTRAP` avoids but nothing enforces.
@@ -288,38 +325,7 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						currentTimeLabel={`${formatTimecode(currentTimeSeconds)} / ${formatTimecode(durationSeconds)}`}
 						playbackTimeSec={currentTimeSeconds}
 						isPlaying={isPlaying}
-						onAddClip={() => {
-							if (importProgress) return; // one import at a time
-							setChromeError(null);
-							// Indeterminate 0% while the OS picker is up; the picker
-							// sheet covers it, and a cancelled pick clears it in
-							// `finally` (pickMedia resolves to an empty handle list).
-							setImportProgress({ percent: 0, label: "Choosing media…" });
-							importAndPlaceMedia({
-								editor,
-								onProgress: (p) => {
-									const overall =
-										((p.index + Math.min(1, Math.max(0, p.fraction))) /
-											Math.max(1, p.total)) *
-										100;
-									// "picking" = post-pick load/copy, which for
-									// iCloud-stored originals is a real download —
-									// name it, or minutes of it read as a hang.
-									const label =
-										p.stage === "picking"
-											? `Preparing media ${p.index + 1} of ${p.total}…`
-											: p.total > 1
-												? `Importing ${p.index + 1} of ${p.total}…`
-												: `Importing ${p.fileName}…`;
-									setImportProgress({
-										percent: Math.round(overall),
-										label,
-									});
-								},
-							})
-								.catch(reportChromeError)
-								.finally(() => setImportProgress(null));
-						}}
+						onAddClip={() => runMediaImport(importAndPlaceMedia)}
 						showAddAudio={!timelineProject.tracks.some((t) => t.kind === "audio")}
 						onAddAudio={() => setActiveSheet("audio")}
 						onQuickAddAudio={() => setActiveSheet("audio")}
@@ -441,8 +447,13 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 					element={visualElement}
 					onClose={closeSheet}
 					onAddOverlay={() => {
-						const ref = insertOverlayShape({ editor });
-						if (ref) selectElement({ editor, ref });
+						// Overlay = picture-in-picture MEDIA (founder, 2026-08-23:
+						// "overlay doesn't mean overlay shape") — the same
+						// import mechanism as the "+" button, landing on an
+						// overlay track. Close the sheet so the OS picker and
+						// the ProgressOverlay aren't buried under it.
+						closeSheet();
+						runMediaImport(importAndPlaceOverlay);
 					}}
 				/>
 			)}

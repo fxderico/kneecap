@@ -827,6 +827,76 @@ export async function importAndPlaceMedia({
 }
 
 /**
+ * Round 29 (founder: "overlay doesn't mean overlay shape, it means
+ * overlay image or video — use the exact same mechanism"): the Overlay
+ * panel's add button runs the SAME native import pipeline as the "+"
+ * button (picker → custody → proxy → asset), then lands each pick as a
+ * picture-in-picture clip: an existing overlay video track with room at
+ * the playhead, else a FRESH overlay track (placement mode "newTrack" —
+ * plain auto would land on the MAIN track whenever it has space there,
+ * which is exactly not what "Overlay" means). Clips start at half scale
+ * so they read as PiP over the main video; the preview-gesture/Overlay
+ * panel's opacity+blend controls already work on them.
+ */
+export async function importAndPlaceOverlay({
+	editor,
+	onProgress,
+}: {
+	editor: EditorCore;
+	onProgress?: NativeImportProgressHandler;
+}): Promise<number> {
+	const bridge = await getNativeBridge();
+	const projectId = editor.project.getActive().metadata.id;
+	const { imported } = await importMediaFromNative({
+		editor,
+		projectId,
+		source: bridge,
+		kinds: ["video", "image"],
+		allowMultiple: true,
+		onProgress,
+	});
+	for (const asset of imported) {
+		const startTime = editor.playback.getCurrentTime();
+		const duration = mediaTimeFromSeconds({
+			seconds: asset.duration || IMAGE_DEFAULT_DURATION_SEC,
+		});
+		const create = buildElementFromMedia({
+			mediaId: asset.id,
+			mediaType: asset.type,
+			name: asset.name,
+			duration,
+			startTime,
+		});
+		create.params = {
+			...create.params,
+			"transform.scaleX": 0.5,
+			"transform.scaleY": 0.5,
+		};
+		const overlayEnd = addMediaTime({ a: startTime, b: duration });
+		const freeOverlayTrack = editor.scenes
+			.getActiveScene()
+			.tracks.overlay.find(
+				(track) =>
+					track.type === "video" &&
+					!track.elements.some(
+						(el) =>
+							el.startTime < overlayEnd &&
+							addMediaTime({ a: el.startTime, b: el.duration }) > startTime,
+					),
+			);
+		editor.command.execute({
+			command: new InsertElementCommand({
+				element: create,
+				placement: freeOverlayTrack
+					? { mode: "explicit", trackId: freeOverlayTrack.id }
+					: { mode: "newTrack", trackType: "video" },
+			}),
+		});
+	}
+	return imported.length;
+}
+
+/**
  * Round 22 (founder: "there needs to be audio import option when u tap
  * audio in menu where it opens up files picker. then puts it in audio
  * track"): Files-picker audio import — native UIDocumentPicker via the
@@ -914,20 +984,6 @@ export function insertStickerElement({
  *  instead, through the exact same `InsertElementCommand` +
  *  `buildGraphicElement` path the demo bootstrap uses, so opacity/blend
  *  mode have something real to act on immediately after tapping it. */
-export function insertOverlayShape({ editor }: { editor: EditorCore }): ElementRef | null {
-	registerDefaultGraphics();
-	const create = buildGraphicElement({
-		definitionId: "rectangle",
-		name: "Overlay shape",
-		startTime: editor.playback.getCurrentTime(),
-		params: { "transform.scaleX": 0.4, "transform.scaleY": 0.4, opacity: 0.8 },
-	});
-	const command = new InsertElementCommand({ element: create, placement: { mode: "auto", trackType: "graphic" } });
-	editor.command.execute({ command });
-	const trackId = command.getTrackId();
-	return trackId ? { trackId, elementId: command.getElementId() } : null;
-}
-
 /** Opacity + blend mode both write to the SAME `element.params` keys every
  *  `VisualElement` already has (`opacity`, `blendMode` —
  *  `params/registry.ts`'s `visualElementParams`), so this is exactly
