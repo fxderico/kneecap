@@ -266,28 +266,20 @@ public enum OverlayLayerBuilder {
 
 		for (index, text) in lines.enumerated() {
 			guard !text.isEmpty else { continue }
-			var attributes: [NSAttributedString.Key: Any] = [
-				NSAttributedString.Key(kCTFontAttributeName as String): font,
-				NSAttributedString.Key(kCTForegroundColorAttributeName as String): fill,
-			]
-			if letterSpacing != 0 {
-				attributes[NSAttributedString.Key(kCTKernAttributeName as String)] = letterSpacing
-			}
-			if let strokeColor, strokePercent > 0 {
-				// Negative = stroke AND fill; magnitude is a percentage of the
-				// font size, the same unit `strokeWidth` carries.
-				attributes[NSAttributedString.Key(kCTStrokeColorAttributeName as String)] = strokeColor
-				attributes[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] = -Double(strokePercent)
-			}
 			// Canvas: lineY = i × lineHeight − visualCenterOffset, +Y down,
 			// baseline "middle" → mirror into CG's +Y up.
 			let lineY = CGFloat(index) * lineHeightPx - visualCenterOffset
 			let baselineY = centerY - lineY - (ascent - descent) / 2
-			let line = CTLineCreateWithAttributedString(
-				NSAttributedString(string: text, attributes: attributes)
+			drawStyledLine(
+				text,
+				at: CGPoint(x: centerX + lineLeft(lineWidths[index]), y: baselineY),
+				font: font,
+				letterSpacing: letterSpacing,
+				fill: fill,
+				strokeColor: strokeColor,
+				strokePercent: strokePercent,
+				in: ctx
 			)
-			ctx.textPosition = CGPoint(x: centerX + lineLeft(lineWidths[index]), y: baselineY)
-			CTLineDraw(line, ctx)
 		}
 
 		return ctx.makeImage()
@@ -519,6 +511,66 @@ public enum OverlayLayerBuilder {
 		return CGRect(x: centerX - width / 2, y: centerY - height / 2, width: width, height: height)
 	}
 
+
+	/// Draws one line the way the CANVAS does (round 35): stroke pass FIRST,
+	/// then the fill on top.
+	///
+	/// The preview calls `strokeText` then `fillText`, so the border's inner
+	/// half is covered by the fill and the glyph keeps its full weight, with
+	/// the border showing only OUTSIDE the outline. The export instead used a
+	/// single pass with a NEGATIVE `kCTStrokeWidth` ("stroke and fill"), which
+	/// paints the stroke OVER the fill — the border ate ~half its width into
+	/// every glyph. Measured on a real export: a 16.2px bold stem rendered
+	/// 14px of white with 2px of black biting in from each side, i.e. exactly
+	/// the "font looks thinner in export" the founder reported, and it made
+	/// borders read heavier than the preview at the same setting.
+	///
+	/// A POSITIVE `kCTStrokeWidth` is stroke-only (no fill), which is the
+	/// direct CoreText equivalent of `strokeText`.
+	private static func drawStyledLine(
+		_ text: String,
+		at position: CGPoint,
+		font: CTFont,
+		letterSpacing: CGFloat,
+		fill: CGColor,
+		strokeColor: CGColor?,
+		strokePercent: CGFloat,
+		in ctx: CGContext
+	) {
+		guard !text.isEmpty else { return }
+		var base: [NSAttributedString.Key: Any] = [
+			NSAttributedString.Key(kCTFontAttributeName as String): font
+		]
+		if letterSpacing != 0 {
+			base[NSAttributedString.Key(kCTKernAttributeName as String)] = letterSpacing
+		}
+
+		if let strokeColor, strokePercent > 0 {
+			var strokeAttributes = base
+			strokeAttributes[NSAttributedString.Key(kCTStrokeColorAttributeName as String)] = strokeColor
+			strokeAttributes[NSAttributedString.Key(kCTForegroundColorAttributeName as String)] = strokeColor
+			// POSITIVE = stroke only, the `strokeText` equivalent.
+			strokeAttributes[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] = Double(strokePercent)
+			ctx.textPosition = position
+			CTLineDraw(
+				CTLineCreateWithAttributedString(
+					NSAttributedString(string: text, attributes: strokeAttributes)
+				),
+				ctx
+			)
+		}
+
+		var fillAttributes = base
+		fillAttributes[NSAttributedString.Key(kCTForegroundColorAttributeName as String)] = fill
+		ctx.textPosition = position
+		CTLineDraw(
+			CTLineCreateWithAttributedString(
+				NSAttributedString(string: text, attributes: fillAttributes)
+			),
+			ctx
+		)
+	}
+
 	private static func rasterizeLine(
 		words: [RasterWord],
 		font: CTFont,
@@ -573,24 +625,18 @@ public enum OverlayLayerBuilder {
 		let baselineY = centerY - (ascent - descent) / 2
 
 		for word in words {
-			var attributes: [NSAttributedString.Key: Any] = [
-				NSAttributedString.Key(kCTFontAttributeName as String): font,
-				NSAttributedString.Key(kCTForegroundColorAttributeName as String): word.fill,
-			]
-			if let strokeColor, strokePercent > 0 {
-				// Negative kCTStrokeWidth = stroke AND fill; magnitude is a
-				// PERCENTAGE of the font size — which is exactly the unit the
-				// `strokeWidth` param carries (round 33), so it passes straight
-				// through. The preview's canvas `lineWidth` is derived from the
-				// same percentage, so the two agree by construction.
-				attributes[NSAttributedString.Key(kCTStrokeColorAttributeName as String)] = strokeColor
-				attributes[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] = -Double(strokePercent)
-			}
-			let line = CTLineCreateWithAttributedString(
-				NSAttributedString(string: word.text, attributes: attributes)
+			// Stroke pass then fill, exactly like the preview's
+			// strokeText → fillText order (see drawStyledLine).
+			drawStyledLine(
+				word.text,
+				at: CGPoint(x: startX + word.x, y: baselineY),
+				font: font,
+				letterSpacing: 0,
+				fill: word.fill,
+				strokeColor: strokeColor,
+				strokePercent: strokePercent,
+				in: ctx
 			)
-			ctx.textPosition = CGPoint(x: startX + word.x, y: baselineY)
-			CTLineDraw(line, ctx)
 		}
 
 		return ctx.makeImage()
