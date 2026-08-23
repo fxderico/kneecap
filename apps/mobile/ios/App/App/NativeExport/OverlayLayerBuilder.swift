@@ -62,6 +62,21 @@ public enum OverlayLayerBuilder {
 
 	// MARK: - Text / sticker / graphic
 
+	/// Multi-line text billboard with FULL preview parity (round 34).
+	///
+	/// The old version drew `content` as ONE CoreText line at a raw point
+	/// size: newline characters vanished from every export, and alignment /
+	/// line height / letter spacing / background were ignored, so exported
+	/// text never matched what the editor showed. This mirrors
+	/// `text/primitives.ts` + `text/layout.ts` exactly:
+	///   - lines = content.split("\n")
+	///   - scaledFontSize = fontSize × renderHeight / 90
+	///   - lineHeightPx = scaledFontSize × lineHeight (default 1.2)
+	///   - line i sits at `i × lineHeightPx − (lineCount−1) × lineHeightPx / 2`
+	///     from the element's center, drawn on the "middle" baseline
+	///   - textAlign shifts each line by 0 / −width / −width⁄2 (left / right /
+	///     center) relative to that center, the same asymmetry the preview has
+	///   - background pad = (30, 42) × fontSize/15, corner radius from the param
 	private static func buildTextBillboard(
 		clip: EdlClip,
 		renderSize: CGSize,
@@ -69,40 +84,108 @@ public enum OverlayLayerBuilder {
 		zIndex: Int
 	) -> OverlayBillboard? {
 		guard let content = clip.params["content"]?.asString, !content.isEmpty else { return nil }
-		// HEIGHT-SCALED, exactly like the preview and like captions (round 33):
-		// `text/primitives.ts` renders text at `fontSize × canvasHeight / 90`,
-		// so drawing the raw param here made every exported text overlay ~21×
-		// too small at 1080×1920 — the founder's title shrank to a speck while
-		// the preview showed it full size. The old "text is authored against
-		// the canvas" comment was simply wrong.
 		let authoredFontSize = CGFloat(clip.params["fontSize"]?.asDouble ?? 48)
 		let fontSize = authoredFontSize * (renderSize.height / fontSizeScaleReference)
+		let fontSizeRatio = authoredFontSize / 15
 		let color = cgColor(fromHex: clip.params["color"]?.asString ?? "#FFFFFF")
 		let bold = (clip.params["fontWeight"]?.asString ?? "normal") == "bold"
-		let font = resolveFont(family: clip.params["fontFamily"]?.asString ?? "Albert Sans", bold: bold, size: fontSize)
+		let italic = (clip.params["fontStyle"]?.asString ?? "normal") == "italic"
+		let font = resolveFont(
+			family: clip.params["fontFamily"]?.asString ?? "Albert Sans",
+			bold: bold,
+			italic: italic,
+			size: fontSize
+		)
 
-		// Text border: a PERCENT of font size (round 33), same as captions.
-		let textStrokeWidth = CGFloat(clip.params["strokeWidth"]?.asDouble ?? 0)
-		let textStrokeColor = cgColor(fromHex: clip.params["strokeColor"]?.asString ?? "#000000")
+		// Border: a PERCENT of font size (round 33), same unit as captions.
+		let strokePercent = CGFloat(clip.params["strokeWidth"]?.asDouble ?? 0)
+		let strokeColor = cgColor(fromHex: clip.params["strokeColor"]?.asString ?? "#000000")
 
-		let width = lineWidth(content, font: font)
-		let height = fontSize * 1.3
-		guard let image = rasterizeLine(
-			words: [RasterWord(text: content, x: 0, width: width, fill: color)],
-			font: font,
-			scaledFontSize: fontSize,
-			totalWidth: width,
-			totalHeight: height,
-			strokeColor: textStrokeWidth > 0 ? textStrokeColor : nil,
-			strokePercent: textStrokeWidth,
-			background: nil,
-			activePill: nil
-		) else { return nil }
+		let lineHeightPx = fontSize * CGFloat(clip.params["lineHeight"]?.asDouble ?? 1.2)
+		// NOT height-scaled — the preview uses this param as raw canvas px too.
+		let letterSpacing = CGFloat(clip.params["letterSpacing"]?.asDouble ?? 0)
+		let align = clip.params["textAlign"]?.asString ?? "center"
+
+		let lines = content.components(separatedBy: "\n")
+		let lineWidths = lines.map { lineWidth($0, font: font, letterSpacing: letterSpacing) }
+		let maxWidth = lineWidths.max() ?? 0
+		guard maxWidth > 0 || lines.count > 1 else { return nil }
+		let blockHeight = CGFloat(lines.count) * lineHeightPx
+
+		/// x of a line's left edge, relative to the element's center — the
+		/// preview's `getTextRect` offsets applied per line.
+		func lineLeft(_ width: CGFloat) -> CGFloat {
+			switch align {
+			case "left": return 0
+			case "right": return -width
+			default: return -width / 2
+			}
+		}
+
+		// Background rect (preview: getTextBackgroundRect), relative to center.
+		let backgroundEnabled = clip.params["background.enabled"]?.asBool ?? false
+		let backgroundColorHex = clip.params["background.color"]?.asString ?? "#000000"
+		var backgroundRect: CGRect? = nil
+		if backgroundEnabled, backgroundColorHex != "transparent" {
+			let padX = CGFloat(clip.params["background.paddingX"]?.asDouble ?? 30) * fontSizeRatio
+			let padY = CGFloat(clip.params["background.paddingY"]?.asDouble ?? 42) * fontSizeRatio
+			let offX = CGFloat(clip.params["background.offsetX"]?.asDouble ?? 0)
+			let offY = CGFloat(clip.params["background.offsetY"]?.asDouble ?? 0)
+			let blockLeft = lineLeft(maxWidth)
+			backgroundRect = CGRect(
+				x: blockLeft - padX + offX,
+				y: -blockHeight / 2 - padY + offY,
+				width: maxWidth + padX * 2,
+				height: blockHeight + padY * 2
+			)
+		}
+
+		// Image bounds, symmetric about the element center so `displayRect`'s
+		// centering lands the content exactly where the preview draws it.
+		var minX: CGFloat = 0
+		var maxX: CGFloat = 0
+		for width in lineWidths {
+			let left = lineLeft(width)
+			minX = min(minX, left)
+			maxX = max(maxX, left + width)
+		}
+		var minY = -blockHeight / 2
+		var maxY = blockHeight / 2
+		if let backgroundRect {
+			minX = min(minX, backgroundRect.minX)
+			maxX = max(maxX, backgroundRect.maxX)
+			minY = min(minY, backgroundRect.minY)
+			maxY = max(maxY, backgroundRect.maxY)
+		}
+		let contentWidth = 2 * max(abs(minX), abs(maxX))
+		let contentHeight = 2 * max(abs(minY), abs(maxY))
+		guard contentWidth > 0, contentHeight > 0 else { return nil }
 
 		let padding = rasterPadding(scaledFontSize: fontSize)
+		let imageWidth = contentWidth + padding * 2
+		let imageHeight = contentHeight + padding * 2
+
+		guard let image = rasterizeTextBlock(
+			lines: lines,
+			lineWidths: lineWidths,
+			font: font,
+			letterSpacing: letterSpacing,
+			lineHeightPx: lineHeightPx,
+			lineLeft: lineLeft,
+			fill: color,
+			strokeColor: strokePercent > 0 ? strokeColor : nil,
+			strokePercent: strokePercent,
+			background: backgroundRect.map {
+				(rect: $0,
+				 color: cgColor(fromHex: backgroundColorHex),
+				 radiusPercent: CGFloat(clip.params["background.cornerRadius"]?.asDouble ?? 0))
+			},
+			imageSize: CGSize(width: imageWidth, height: imageHeight)
+		) else { return nil }
+
 		let rect = displayRect(
-			contentWidth: width + padding * 2,
-			contentHeight: height + padding * 2,
+			contentWidth: imageWidth,
+			contentHeight: imageHeight,
 			transform: clip.transform,
 			renderSize: renderSize,
 			positionFractionY: 0
@@ -114,6 +197,100 @@ public enum OverlayLayerBuilder {
 			timeRange: EdlTime.cmTimeRange(startTicks: clip.startTicks, durationTicks: clip.durationTicks, ticksPerSecond: ticksPerSecond),
 			zIndex: zIndex
 		)
+	}
+
+	/// Draws the measured text block into a bitmap whose CENTER is the
+	/// element's center (see buildTextBillboard). CoreGraphics is bottom-up
+	/// while the layout math is the canvas's top-down +Y, so every y is
+	/// mirrored once, here.
+	private static func rasterizeTextBlock(
+		lines: [String],
+		lineWidths: [CGFloat],
+		font: CTFont,
+		letterSpacing: CGFloat,
+		lineHeightPx: CGFloat,
+		lineLeft: (CGFloat) -> CGFloat,
+		fill: CGColor,
+		strokeColor: CGColor?,
+		strokePercent: CGFloat,
+		background: (rect: CGRect, color: CGColor, radiusPercent: CGFloat)?,
+		imageSize: CGSize
+	) -> CGImage? {
+		let width = Int(ceil(imageSize.width))
+		let height = Int(ceil(imageSize.height))
+		guard width > 0, height > 0,
+			  let ctx = CGContext(
+				data: nil,
+				width: width,
+				height: height,
+				bitsPerComponent: 8,
+				bytesPerRow: 0,
+				space: CGColorSpaceCreateDeviceRGB(),
+				bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+			  ) else { return nil }
+
+		let centerX = imageSize.width / 2
+		let centerY = imageSize.height / 2
+
+		if let background {
+			// Canvas-space rect (top-down) → CG rect (bottom-up).
+			let rect = CGRect(
+				x: centerX + background.rect.minX,
+				y: centerY - background.rect.maxY,
+				width: background.rect.width,
+				height: background.rect.height
+			)
+			let p = max(0, min(100, background.radiusPercent)) / 100
+			let radius = (min(rect.width, rect.height) / 2) * p
+			ctx.setFillColor(background.color)
+			if radius > 0 {
+				ctx.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+				ctx.fillPath()
+			} else {
+				ctx.fill(rect)
+			}
+		}
+
+		var ascent: CGFloat = 0
+		var descent: CGFloat = 0
+		CTLineGetTypographicBounds(
+			CTLineCreateWithAttributedString(
+				NSAttributedString(
+					string: "Ag",
+					attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+				)
+			),
+			&ascent, &descent, nil
+		)
+		let visualCenterOffset = (CGFloat(lines.count) - 1) * lineHeightPx / 2
+
+		for (index, text) in lines.enumerated() {
+			guard !text.isEmpty else { continue }
+			var attributes: [NSAttributedString.Key: Any] = [
+				NSAttributedString.Key(kCTFontAttributeName as String): font,
+				NSAttributedString.Key(kCTForegroundColorAttributeName as String): fill,
+			]
+			if letterSpacing != 0 {
+				attributes[NSAttributedString.Key(kCTKernAttributeName as String)] = letterSpacing
+			}
+			if let strokeColor, strokePercent > 0 {
+				// Negative = stroke AND fill; magnitude is a percentage of the
+				// font size, the same unit `strokeWidth` carries.
+				attributes[NSAttributedString.Key(kCTStrokeColorAttributeName as String)] = strokeColor
+				attributes[NSAttributedString.Key(kCTStrokeWidthAttributeName as String)] = -Double(strokePercent)
+			}
+			// Canvas: lineY = i × lineHeight − visualCenterOffset, +Y down,
+			// baseline "middle" → mirror into CG's +Y up.
+			let lineY = CGFloat(index) * lineHeightPx - visualCenterOffset
+			let baselineY = centerY - lineY - (ascent - descent) / 2
+			let line = CTLineCreateWithAttributedString(
+				NSAttributedString(string: text, attributes: attributes)
+			)
+			ctx.textPosition = CGPoint(x: centerX + lineLeft(lineWidths[index]), y: baselineY)
+			CTLineDraw(line, ctx)
+		}
+
+		return ctx.makeImage()
 	}
 
 	// MARK: - Captions
@@ -278,12 +455,17 @@ public enum OverlayLayerBuilder {
 		var color: CGColor
 	}
 
-	private static func resolveFont(family: String, bold: Bool, size: CGFloat) -> CTFont {
+	private static func resolveFont(family: String, bold: Bool, italic: Bool = false, size: CGFloat) -> CTFont {
 		if family == "Albert Sans" {
 			// Bundled with the app (UIAppFonts, round 31) under its
 			// PostScript names — resolve those directly rather than trusting
-			// family-name lookup on a just-registered font.
-			return CTFontCreateWithName((bold ? "AlbertSans-Bold" : "AlbertSans-Regular") as CFString, size, nil)
+			// family-name lookup on a just-registered font. Only Regular and
+			// Bold ship; italic is synthesized by the trait pass below.
+			let base = CTFontCreateWithName((bold ? "AlbertSans-Bold" : "AlbertSans-Regular") as CFString, size, nil)
+			if italic, let slanted = CTFontCreateCopyWithSymbolicTraits(base, size, nil, .traitItalic, .traitItalic) {
+				return slanted
+			}
+			return base
 		}
 		if family == "Arial" || family == "Inter" {
 			// Arial ships on both platforms under its PostScript names;
@@ -292,18 +474,26 @@ public enum OverlayLayerBuilder {
 			return CTFontCreateWithName((bold ? "Arial-BoldMT" : "ArialMT") as CFString, size, nil)
 		}
 		let base = CTFontCreateWithName(family as CFString, size, nil)
-		if bold, let boldFont = CTFontCreateCopyWithSymbolicTraits(base, size, nil, .traitBold, .traitBold) {
-			return boldFont
+		var traits: CTFontSymbolicTraits = []
+		if bold { traits.insert(.traitBold) }
+		if italic { traits.insert(.traitItalic) }
+		if !traits.isEmpty,
+		   let styled = CTFontCreateCopyWithSymbolicTraits(base, size, nil, traits, traits) {
+			return styled
 		}
 		return base
 	}
 
-	private static func lineWidth(_ text: String, font: CTFont) -> CGFloat {
-		let attributed = NSAttributedString(
-			string: text,
-			attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+	private static func lineWidth(_ text: String, font: CTFont, letterSpacing: CGFloat = 0) -> CGFloat {
+		var attributes: [NSAttributedString.Key: Any] = [
+			NSAttributedString.Key(kCTFontAttributeName as String): font
+		]
+		if letterSpacing != 0 {
+			attributes[NSAttributedString.Key(kCTKernAttributeName as String)] = letterSpacing
+		}
+		let line = CTLineCreateWithAttributedString(
+			NSAttributedString(string: text, attributes: attributes)
 		)
-		let line = CTLineCreateWithAttributedString(attributed)
 		return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
 	}
 

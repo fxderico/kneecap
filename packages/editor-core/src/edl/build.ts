@@ -330,6 +330,11 @@ function orderTracks({ tracks }: { tracks: SceneTracks }): Array<{
 	kind: "main" | "overlay" | "audio";
 	zIndex: number | null;
 }> {
+	// zIndex ascends bottom-to-top: main first, then overlays. CAPTIONS
+	// ALWAYS ON TOP (round 34, founder: "captions are always layered on top
+	// of text") — otherwise a text track added later out-stacked them.
+	// `services/renderer/scene-builder.ts` applies the same rule so the
+	// preview and the export stack identically.
 	const composited: Array<{
 		track: VideoTrack | OverlayTrack;
 		kind: "main" | "overlay";
@@ -337,6 +342,7 @@ function orderTracks({ tracks }: { tracks: SceneTracks }): Array<{
 		{ track: tracks.main, kind: "main" },
 		...[...tracks.overlay]
 			.reverse()
+			.sort((a, b) => Number(a.type === "caption") - Number(b.type === "caption"))
 			.map((track) => ({ track, kind: "overlay" as const })),
 	];
 

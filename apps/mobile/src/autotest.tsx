@@ -269,7 +269,10 @@ async function runPhase({
 					name: "autotest-text",
 					duration: mediaTimeFromSeconds({ seconds: 4 }),
 					params: {
-						content: "HH",
+						// Two lines + a trailing caption underneath: round 34
+					// regression coverage for "line breaks are not registering
+					// in export" and "captions must layer on top of text".
+					content: "HH\nHH",
 						fontSize: 15,
 						color: "#ffffff",
 						strokeColor: "#000000",

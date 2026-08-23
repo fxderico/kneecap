@@ -463,3 +463,66 @@ describe("EDL v1 frozen artefacts", () => {
 		expect(buildFixtureEdl().$schema).toBe(EDL_SCHEMA_ID);
 	});
 });
+
+/**
+ * Round 34 (founder: "make sure captions are always layered on top of
+ * text"): overlay stacking otherwise follows track order, so a text track
+ * added after the captions out-stacked them. `orderTracks` sorts caption
+ * tracks last (highest zIndex = drawn on top), and
+ * `services/renderer/scene-builder.ts` applies the same rule so the
+ * preview and the export stack identically.
+ */
+describe("overlay stacking: captions always on top", () => {
+	function buildSceneWithCaptionUnderText() {
+		const scene = buildFixtureScene();
+		const captionTrack = {
+			id: "track-caption",
+			name: "Captions",
+			type: "caption" as const,
+			hidden: false,
+			elements: [],
+		};
+		return {
+			...scene,
+			tracks: {
+				...scene.tracks,
+				// Captions FIRST in the array — i.e. visually below the text
+				// track under the old rule. The builder must still put them on
+				// top.
+				overlay: [captionTrack as never, ...scene.tracks.overlay],
+			},
+		};
+	}
+
+	test("a caption track outranks a text track added after it", () => {
+		const edl = buildEdl({
+			project: buildFixtureProject(),
+			scene: buildSceneWithCaptionUnderText(),
+			mediaAssets: buildFixtureMediaAssets(),
+			output: FIXTURE_OUTPUT,
+			resolveAsset: fixtureAssetResolver,
+		});
+		const caption = edl.tracks.find((t) => t.trackId === "track-caption");
+		const text = edl.tracks.find((t) => t.trackId === "track-text");
+		expect(caption?.zIndex).not.toBeNull();
+		expect(text?.zIndex).not.toBeNull();
+		expect(caption!.zIndex!).toBeGreaterThan(text!.zIndex!);
+	});
+
+	test("the main track stays at the bottom", () => {
+		const edl = buildEdl({
+			project: buildFixtureProject(),
+			scene: buildSceneWithCaptionUnderText(),
+			mediaAssets: buildFixtureMediaAssets(),
+			output: FIXTURE_OUTPUT,
+			resolveAsset: fixtureAssetResolver,
+		});
+		const main = edl.tracks.find((t) => t.kind === "main");
+		const others = edl.tracks.filter(
+			(t) => t.kind === "overlay" && t.zIndex !== null,
+		);
+		for (const track of others) {
+			expect(track.zIndex!).toBeGreaterThan(main!.zIndex!);
+		}
+	});
+});

@@ -254,7 +254,15 @@ export function buildScene({
 		...tracks.overlay.filter((track) => !("hidden" in track && track.hidden)),
 		...(!tracks.main.hidden ? [tracks.main] : []),
 	];
-	const orderedTracksBottomToTop = visibleTracks.slice().reverse();
+	// CAPTIONS ALWAYS ON TOP (round 34, founder): overlay stacking otherwise
+	// follows track order, so a text overlay added after captions covered
+	// them. Caption tracks are sorted last in bottom-to-top order (drawn
+	// last = on top); `edl/build.ts`'s orderTracks applies the same rule so
+	// preview and export stack identically.
+	const orderedTracksBottomToTop = visibleTracks
+		.slice()
+		.reverse()
+		.sort((a, b) => Number(a.type === "caption") - Number(b.type === "caption"));
 	const mainTrack = tracks.main.hidden ? undefined : tracks.main;
 
 	const allNodes = buildTrackNodes({
