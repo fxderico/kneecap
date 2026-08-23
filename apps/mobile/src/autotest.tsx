@@ -236,9 +236,15 @@ async function runPhase({
 					mediaType: asset.type,
 					name: asset.name,
 					duration: mediaTimeFromSeconds({ seconds: durationSec }),
+					// The AUDIO clip deliberately OVERHANGS the main track's end
+					// (round 32 regression coverage): a composition whose
+					// instructions stop before its full duration is rejected
+					// with AVErrorInvalidVideoComposition (-11841) — the
+					// founder's export died on 2026-08-23. Starting it 1s before
+					// the last visual clip ends leaves a real uncovered tail.
 					startTime: isVisual
 						? mediaTimeFromSeconds({ seconds: mainCursorSec })
-						: editor.playback.getCurrentTime(),
+						: mediaTimeFromSeconds({ seconds: Math.max(0, mainCursorSec - 1) }),
 				}),
 				// Same per-kind routing as actions.ts: audio files land on an
 				// audio track (importAndPlaceAudio), visual media on video.

@@ -247,6 +247,28 @@ public enum VideoCompositionBuilder {
 			segments.append(Segment(startTicks: window.startTicks, endTicks: window.endTicks, instruction: instruction))
 		}
 
+		// Background-only instructions for spans with no main clip under them
+		// (round 32): a video composition whose instructions don't cover its
+		// FULL duration is rejected with AVErrorInvalidVideoComposition
+		// (-11841) — which is exactly what a PiP overlay or audio clip
+		// running past the last main clip produced on the founder's device.
+		// These render the canvas background and are paced by the filler lane
+		// (see BuiltComposition.backgroundOnlyRanges / stillPacerTrackID).
+		for range in built.backgroundOnlyRanges {
+			guard range.duration > .zero else { continue }
+			let instruction = EdlVideoCompositionInstruction(
+				timeRange: range,
+				primaryTrackID: kCMPersistentTrackID_Invalid,
+				pacerTrackID: built.stillPacerTrackID ?? kCMPersistentTrackID_Invalid,
+				backgroundColor: backgroundColor,
+				overlayVideoLayers: pipLayersIntersecting(range),
+				overlayBillboards: billboardsIntersecting(range)
+			)
+			let startTicks = Int64((range.start.seconds * Double(tps)).rounded())
+			let endTicks = Int64((range.end.seconds * Double(tps)).rounded())
+			segments.append(Segment(startTicks: startTicks, endTicks: endTicks, instruction: instruction))
+		}
+
 		segments.sort { $0.startTicks < $1.startTicks }
 
 		let composition = AVMutableVideoComposition()

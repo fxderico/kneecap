@@ -175,6 +175,18 @@ public enum EdlExporter {
 			}
 		}
 
+		// Coverage diagnostic (round 32): AVFoundation reports an
+		// out-of-spec video composition as a bare -11841
+		// (AVErrorInvalidVideoComposition) with no detail, so print the shape
+		// that decides validity — instructions MUST tile [0, duration]
+		// contiguously. `built.backgroundOnlyRanges` fills spans with no main
+		// clip; anything still uncovered here would be a real bug.
+		if let first = videoComposition.instructions.first,
+		   let last = videoComposition.instructions.last {
+			let covered = CMTimeRangeGetUnion(first.timeRange, otherRange: last.timeRange)
+			print("[kneecap-export] video composition: \(videoComposition.instructions.count) instruction(s) covering \(covered.start.seconds)s–\(covered.end.seconds)s of \(composition.duration.seconds)s, renderSize=\(Int(videoComposition.renderSize.width))x\(Int(videoComposition.renderSize.height))")
+		}
+
 		guard reader.startReading() else {
 			throw EdlExportError.readerFailed(reader.error?.localizedDescription ?? "unknown")
 		}

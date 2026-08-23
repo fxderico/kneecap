@@ -32,6 +32,12 @@ public struct BuiltComposition {
 	/// still instructions REQUIRE it; the compositor never reads its
 	/// frames — they only drive the frame clock.
 	public var stillPacerTrackID: CMPersistentTrackID?
+	/// Output spans with NO main-track clip under them — before the first
+	/// clip, or (the -11841 case) after the last one when a PiP overlay or
+	/// audio clip runs longer. A video composition MUST cover its whole
+	/// duration, so `VideoCompositionBuilder` emits a background-only
+	/// instruction for each of these, paced by `stillPacerTrackID`.
+	public var backgroundOnlyRanges: [CMTimeRange]
 	public var audioMix: AVMutableAudioMix?
 	/// The input EDL with every NON-main-track clip's `startTicks` (and
 	/// `meta.durationTicks`) remapped through
@@ -204,50 +210,6 @@ public enum CompositionBuilder {
 			}
 		}
 
-		// PACER lane for main-track IMAGE segments (see
-		// `BuiltComposition.stillPacerTrackID`): AVAssetReaderVideoComposition-
-		// Output only schedules an instruction while its REQUIRED tracks have
-		// samples — a still segment requiring nothing is never composed (a
-		// trailing photo truncated the export to the video's end; verified in
-		// the sim 2026-08-23, as was the corollary that trailing EMPTY ranges
-		// don't extend the composition's duration). Looped 1s/30fps black
-		// filler under every image segment gives the reader a frame clock;
-		// still instructions require this lane, the compositor never reads it.
-		var stillPacerTrackID: CMPersistentTrackID?
-		let imagePlacements = sortedMainClips.enumerated().compactMap { _, clip -> ClipPlacement? in
-			clip.kind == "image" ? placementByClipId[clip.clipId] : nil
-		}
-		if !imagePlacements.isEmpty {
-			guard let pacerLane = composition.addMutableTrack(
-				withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-				throw CompositionBuilderError.noMainTrack
-			}
-			let filler = try await Self.blackFillerAsset()
-			let fillerTracks = try await filler.load(.tracks)
-			guard let fillerTrack = fillerTracks.first(where: { $0.mediaType == .video }) else {
-				throw CompositionBuilderError.noMainTrack
-			}
-			let fillerDuration = try await filler.load(.duration)
-			for placement in imagePlacements {
-				var cursor = EdlTime.cmTime(ticks: placement.insertStartTicks, ticksPerSecond: tps)
-				let segmentEnd = EdlTime.cmTime(
-					ticks: placement.insertStartTicks + placement.insertDurationTicks,
-					ticksPerSecond: tps
-				)
-				while cursor < segmentEnd {
-					let chunk = CMTimeMinimum(fillerDuration, CMTimeSubtract(segmentEnd, cursor))
-					try pacerLane.insertTimeRange(
-						CMTimeRange(start: .zero, duration: chunk),
-						of: fillerTrack,
-						at: cursor
-					)
-					cursor = CMTimeAdd(cursor, chunk)
-				}
-			}
-			stillPacerTrackID = pacerLane.trackID
-			print("[kneecap-export] still pacer lane \(pacerLane.trackID) covers \(imagePlacements.count) image segment(s); composition=\(composition.duration.seconds)s")
-		}
-
 		// Background-music / secondary audio tracks (`kind == "audio"`):
 		// no transitions apply off the main track in v1, so a plain
 		// sequential insert per clip suffices.
@@ -333,7 +295,105 @@ public enum CompositionBuilder {
 		let audioMix = AVMutableAudioMix()
 		audioMix.inputParameters = audioRampInstructions + bgmMixParams + overlayAudioParams
 
-		let totalDurationTicks = placements.last?.insertEndTicks ?? 0
+		// PACER + COVERAGE lane (round 28, extended round 32).
+		//
+		// Two jobs, both about AVFoundation's own rules, and both needing to
+		// run AFTER every track insert (the composition's duration is only
+		// final here):
+		//
+		//  1. PACING — `AVAssetReaderVideoCompositionOutput` schedules an
+		//     instruction only while its REQUIRED tracks have samples. A
+		//     main-track IMAGE segment has no lane (a JPEG can't open as an
+		//     AVURLAsset), so without filler under it the segment is never
+		//     composed (a trailing photo truncated the export; sim 2026-08-23).
+		//
+		//  2. COVERAGE — a video composition whose instructions do not cover
+		//     the composition's ENTIRE duration is rejected outright with
+		//     AVErrorInvalidVideoComposition (-11841). Instructions come from
+		//     MAIN-track placements only, but the composition's duration is
+		//     the max across ALL tracks: one PiP overlay or audio clip
+		//     extending past the last main clip left the tail uncovered and
+		//     killed the whole export (founder's device, 2026-08-23). Same for
+		//     any gap before the first main clip.
+		//
+		// Both are solved the same way: looped 1s/30fps 64×64 black filler in
+		// a dedicated lane, required by the instructions that have no real
+		// source. The compositor never reads its frames — they only drive the
+		// frame clock; uncovered spans render as canvas background.
+		var stillPacerTrackID: CMPersistentTrackID?
+		var backgroundOnlyRanges: [CMTimeRange] = []
+		let imageRanges: [CMTimeRange] = sortedMainClips.compactMap { clip in
+			guard clip.kind == "image", let placement = placementByClipId[clip.clipId] else { return nil }
+			return EdlTime.cmTimeRange(
+				startTicks: placement.insertStartTicks,
+				durationTicks: placement.insertDurationTicks,
+				ticksPerSecond: tps
+			)
+		}
+		let compositionEnd = composition.duration
+		if compositionEnd.isValid, compositionEnd.isNumeric, compositionEnd > .zero {
+			// Uncovered = [0, compositionEnd] minus the main placements'
+			// output ranges (which are contiguous and ascending by
+			// construction — MainTrackPlacement lays them end to end).
+			var cursor = CMTime.zero
+			for placement in placements.sorted(by: { $0.insertStartTicks < $1.insertStartTicks }) {
+				let segStart = EdlTime.cmTime(ticks: placement.insertStartTicks, ticksPerSecond: tps)
+				let segEnd = EdlTime.cmTime(
+					ticks: placement.insertStartTicks + placement.insertDurationTicks,
+					ticksPerSecond: tps
+				)
+				if segStart > cursor {
+					backgroundOnlyRanges.append(CMTimeRange(start: cursor, end: segStart))
+				}
+				cursor = CMTimeMaximum(cursor, segEnd)
+			}
+			if cursor < compositionEnd {
+				backgroundOnlyRanges.append(CMTimeRange(start: cursor, end: compositionEnd))
+			}
+		}
+
+		let pacerRanges = imageRanges + backgroundOnlyRanges
+		if !pacerRanges.isEmpty {
+			guard let pacerLane = composition.addMutableTrack(
+				withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+				throw CompositionBuilderError.noMainTrack
+			}
+			let filler = try await Self.blackFillerAsset()
+			let fillerTracks = try await filler.load(.tracks)
+			guard let fillerTrack = fillerTracks.first(where: { $0.mediaType == .video }) else {
+				throw CompositionBuilderError.noMainTrack
+			}
+			let fillerDuration = try await filler.load(.duration)
+			for range in pacerRanges.sorted(by: { $0.start < $1.start }) {
+				var cursor = range.start
+				while cursor < range.end {
+					let chunk = CMTimeMinimum(fillerDuration, CMTimeSubtract(range.end, cursor))
+					guard chunk > .zero else { break }
+					try pacerLane.insertTimeRange(
+						CMTimeRange(start: .zero, duration: chunk),
+						of: fillerTrack,
+						at: cursor
+					)
+					cursor = CMTimeAdd(cursor, chunk)
+				}
+			}
+			stillPacerTrackID = pacerLane.trackID
+			print("[kneecap-export] pacer lane \(pacerLane.trackID): \(imageRanges.count) still segment(s), \(backgroundOnlyRanges.count) uncovered span(s); composition=\(compositionEnd.seconds)s")
+		}
+
+		// The WHOLE timeline, not just the main track (round 32): a PiP
+		// overlay or audio clip may run past the last main clip, and the
+		// preview plays that tail (editor-core's calculateTotalDuration spans
+		// every track), so the export must too — trailing audio over the
+		// canvas background, exactly like CapCut. Using the main-track end
+		// here truncated those exports and made the output-integrity re-probe
+		// disagree with the file it had just written.
+		let mainEndTicks = placements.last?.insertEndTicks ?? 0
+		let compositionEndTicks =
+			compositionEnd.isValid && compositionEnd.isNumeric
+				? Int64((compositionEnd.seconds * Double(tps)).rounded())
+				: 0
+		let totalDurationTicks = max(mainEndTicks, compositionEndTicks)
 
 		var remappedTracks: [EdlTrack] = []
 		for track in edl.tracks {
@@ -375,6 +435,7 @@ public enum CompositionBuilder {
 			transitionWindows: windows,
 			overlayVideoTrackIDs: overlayVideoTrackIDs,
 			stillPacerTrackID: stillPacerTrackID,
+			backgroundOnlyRanges: backgroundOnlyRanges,
 			audioMix: audioMix,
 			remappedEdl: remappedEdl
 		)
