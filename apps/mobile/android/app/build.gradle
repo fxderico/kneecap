@@ -32,12 +32,34 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // On-device captions: libkneecap_whisper.so (whisper.cpp + the JNI
+        // glue in src/main/cpp). arm64-v8a only — it is every current real
+        // Android phone and the Apple-silicon emulator image, and each extra
+        // ABI roughly doubles both native build time and APK size for a
+        // 77MB-model feature. The library is skipped entirely (see
+        // src/main/cpp/CMakeLists.txt) when scripts/fetch-whisper-cpp.sh has
+        // not been run, so this never breaks a plain `assembleDebug`.
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
     signingConfigs {
         if (hasReleaseSigning) {
             release {

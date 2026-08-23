@@ -144,30 +144,192 @@ public final class WhisperTranscriber {
 		}
 	}
 
+	/**
+	 * whisper.cpp's {@code whisper_init_from_file} needs a real filesystem
+	 * path, not an APK asset stream, so the bundled model is copied out to
+	 * {@code filesDir/models/} once and reused. The copy is size-guarded
+	 * rather than hash-guarded: the asset is immutable within an installed
+	 * APK, so a cached file of the right length is the right file, and a
+	 * partial copy from a killed process has the wrong length and is redone.
+	 */
 	private static String resolveAbsoluteModelPath(Context context, String assetPath) {
-		// whisper.cpp's `whisper_init_from_file` needs a real filesystem
-		// path, not an APK asset stream — the actual implementation copies
-		// the asset to `context.getFilesDir()` once (cached across calls)
-		// before calling into WhisperJNI. Not implemented in this session;
-		// see class doc comment — `transcribe()` never reaches this call in
-		// practice today because `decodeToMono16kFloat` throws first.
-		throw new NotYetWiredException(
-				"resolveAbsoluteModelPath: asset-to-filesystem-cache copy not implemented yet (M10 follow-up).");
+		java.io.File cached = new java.io.File(context.getFilesDir(), assetPath);
+		long assetLength = assetLength(context, assetPath);
+		if (cached.isFile() && assetLength > 0 && cached.length() == assetLength) {
+			return cached.getAbsolutePath();
+		}
+		java.io.File parent = cached.getParentFile();
+		if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+			throw new IllegalStateException("cannot create model cache dir " + parent);
+		}
+		java.io.File partial = new java.io.File(cached.getPath() + ".part");
+		try (java.io.InputStream in = context.getAssets().open(assetPath);
+				java.io.OutputStream out = new java.io.FileOutputStream(partial)) {
+			byte[] buffer = new byte[1 << 16];
+			int read;
+			while ((read = in.read(buffer)) != -1) {
+				out.write(buffer, 0, read);
+			}
+		} catch (java.io.IOException e) {
+			throw new IllegalStateException("cannot copy model asset " + assetPath, e);
+		}
+		// Rename last: a reader either sees no file or a complete one, never a
+		// half-written model that whisper_init would fail on cryptically.
+		if (!partial.renameTo(cached)) {
+			throw new IllegalStateException("cannot finalize model cache file " + cached);
+		}
+		return cached.getAbsolutePath();
+	}
+
+	private static long assetLength(Context context, String assetPath) {
+		try (android.content.res.AssetFileDescriptor fd =
+				context.getAssets().openFd(assetPath)) {
+			return fd.getLength();
+		} catch (java.io.IOException e) {
+			// Assets over ~1MB are stored uncompressed and openFd works; a
+			// compressed asset throws here, in which case the length is
+			// unknown and the copy is simply redone each cold start.
+			return -1;
+		}
 	}
 
 	/**
-	 * See class doc comment, gap #2. Deliberately throws with a specific,
-	 * actionable message instead of returning a zero-filled or truncated
-	 * buffer — a caller silently getting back "silence" would be a much
-	 * worse failure mode than a clear, immediate exception.
+	 * Decodes any audio-bearing native-custody file (the audio track of an
+	 * mp4 works as well as a bare m4a) to the 16kHz mono float32 PCM that
+	 * whisper.cpp requires, via MediaExtractor + MediaCodec.
+	 *
+	 * <p>Downmix is a plain channel average and the resample is linear
+	 * interpolation. Both are deliberate: whisper's own front end immediately
+	 * reduces this to an 80-bin log-mel spectrogram at a 10ms hop, so the
+	 * imaging artifacts a higher-order resampler would suppress land far
+	 * above the band that survives that transform. This is the same tradeoff
+	 * upstream's {@code examples/whisper.android} makes.
 	 */
 	private static float[] decodeToMono16kFloat(Context context, String audioUri) {
-		throw new NotYetWiredException(
-				"Audio decode to 16kHz mono float32 PCM is not implemented yet (M10 follow-up;"
-						+ " overlaps with M4's media pipeline — see WhisperTranscriber's class doc"
-						+ " comment). audioUri="
-						+ audioUri);
+		String path = audioUri.startsWith("file://") ? android.net.Uri.parse(audioUri).getPath() : audioUri;
+		if (path == null) {
+			throw new IllegalArgumentException("cannot resolve a filesystem path from " + audioUri);
+		}
+		android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+		android.media.MediaCodec codec = null;
+		try {
+			extractor.setDataSource(path);
+			int audioTrack = -1;
+			android.media.MediaFormat inputFormat = null;
+			for (int i = 0; i < extractor.getTrackCount(); i++) {
+				android.media.MediaFormat format = extractor.getTrackFormat(i);
+				String mime = format.getString(android.media.MediaFormat.KEY_MIME);
+				if (mime != null && mime.startsWith("audio/")) {
+					audioTrack = i;
+					inputFormat = format;
+					break;
+				}
+			}
+			if (audioTrack < 0 || inputFormat == null) {
+				throw new IllegalStateException("no audio track in " + path);
+			}
+			extractor.selectTrack(audioTrack);
+
+			codec = android.media.MediaCodec.createDecoderByType(
+					inputFormat.getString(android.media.MediaFormat.KEY_MIME));
+			codec.configure(inputFormat, null, null, 0);
+			codec.start();
+
+			// The decoder reports the AUTHORITATIVE rate/channel count on its
+			// output format, which can differ from the container's (HE-AAC
+			// decoders routinely output double the signalled rate), so both
+			// are read from the output format as it arrives, not from
+			// `inputFormat`.
+			int sourceRate = inputFormat.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE);
+			int sourceChannels = inputFormat.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT);
+
+			java.io.ByteArrayOutputStream monoBytes = new java.io.ByteArrayOutputStream();
+			android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+			boolean inputDone = false;
+			boolean outputDone = false;
+			while (!outputDone) {
+				if (!inputDone) {
+					int inputIndex = codec.dequeueInputBuffer(10_000);
+					if (inputIndex >= 0) {
+						java.nio.ByteBuffer buffer = codec.getInputBuffer(inputIndex);
+						int size = buffer == null ? -1 : extractor.readSampleData(buffer, 0);
+						if (size < 0) {
+							codec.queueInputBuffer(
+									inputIndex, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+							inputDone = true;
+						} else {
+							codec.queueInputBuffer(inputIndex, 0, size, extractor.getSampleTime(), 0);
+							extractor.advance();
+						}
+					}
+				}
+				int outputIndex = codec.dequeueOutputBuffer(info, 10_000);
+				if (outputIndex == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+					android.media.MediaFormat outputFormat = codec.getOutputFormat();
+					sourceRate = outputFormat.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE);
+					sourceChannels = outputFormat.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT);
+				} else if (outputIndex >= 0) {
+					java.nio.ByteBuffer buffer = codec.getOutputBuffer(outputIndex);
+					if (buffer != null && info.size > 0) {
+						buffer.position(info.offset);
+						buffer.limit(info.offset + info.size);
+						byte[] chunk = new byte[info.size];
+						buffer.get(chunk);
+						monoBytes.write(chunk, 0, chunk.length);
+					}
+					codec.releaseOutputBuffer(outputIndex, false);
+					if ((info.flags & android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+						outputDone = true;
+					}
+				}
+			}
+
+			return resampleToMono16k(monoBytes.toByteArray(), sourceRate, Math.max(1, sourceChannels));
+		} catch (java.io.IOException e) {
+			throw new IllegalStateException("cannot decode audio at " + path, e);
+		} finally {
+			if (codec != null) {
+				try {
+					codec.stop();
+				} catch (IllegalStateException ignored) {
+					// Already stopped/released after an error — nothing to do.
+				}
+				codec.release();
+			}
+			extractor.release();
+		}
 	}
+
+	/** 16-bit interleaved PCM → averaged mono → linearly resampled 16kHz float. */
+	private static float[] resampleToMono16k(byte[] pcm16, int sourceRate, int channels) {
+		java.nio.ShortBuffer shorts =
+				java.nio.ByteBuffer.wrap(pcm16).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer();
+		int frames = shorts.remaining() / channels;
+		float[] mono = new float[frames];
+		for (int frame = 0; frame < frames; frame++) {
+			int sum = 0;
+			for (int channel = 0; channel < channels; channel++) {
+				sum += shorts.get(frame * channels + channel);
+			}
+			mono[frame] = (sum / (float) channels) / 32768f;
+		}
+		if (sourceRate == TARGET_SAMPLE_RATE || frames == 0) {
+			return mono;
+		}
+		double ratio = sourceRate / (double) TARGET_SAMPLE_RATE;
+		int outFrames = (int) Math.floor(frames / ratio);
+		float[] out = new float[outFrames];
+		for (int i = 0; i < outFrames; i++) {
+			double position = i * ratio;
+			int low = (int) position;
+			int high = Math.min(low + 1, frames - 1);
+			float fraction = (float) (position - low);
+			out[i] = mono[low] * (1 - fraction) + mono[high] * fraction;
+		}
+		return out;
+	}
+
+	private static final int TARGET_SAMPLE_RATE = 16_000;
 
 	private static int preferredThreadCount() {
 		// Matches examples/whisper.android's own WhisperCpuConfig heuristic

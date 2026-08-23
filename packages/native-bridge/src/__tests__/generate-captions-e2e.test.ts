@@ -33,16 +33,20 @@ describe("NativeBridge.transcribe() -> buildCaptionElementsFromTranscript()", ()
 			timelineStartTime: ZERO_MEDIA_TIME,
 		});
 
-		expect(elements).toHaveLength(segments.length);
+		// One element per caption PAGE, not per segment: generation chunks a
+		// segment into short pages (publikclip parity) so a long sentence does
+		// not sit on screen as one wall of text. So pages >= segments, and the
+		// words are conserved across the split.
+		expect(elements.length).toBeGreaterThanOrEqual(segments.length);
 		expect(elements.every((el) => el.type === "caption")).toBe(true);
 		expect(elements.every((el) => el.words.length > 0)).toBe(true);
 
-		// First element's first/last word match the fixture's own text —
-		// proves the microseconds -> ticks conversion ran on the REAL
+		// First and last word of the whole transcript match the fixture's own
+		// text — proves the microseconds -> ticks conversion ran on the REAL
 		// transcribe() output, not a copy of it.
-		expect(elements[0].words[0].text).toBe("kneecap");
-		const lastWordOfFirstSegment = elements[0].words[elements[0].words.length - 1];
-		expect(lastWordOfFirstSegment.text).toBe("editor");
+		const allWords = elements.flatMap((el) => el.words);
+		expect(allWords[0].text).toBe("kneecap");
+		expect(allWords.map((word) => word.text)).toContain("editor");
 
 		// Every word's span is inside its own element's [0, duration] — the
 		// same invariant `getVisibleCaptionWords`/`getActiveCaptionWordIndex`

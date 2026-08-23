@@ -21,6 +21,8 @@ import org.json.JSONObject
 import dev.kneecap.app.edl.EdlParseException
 import dev.kneecap.app.edl.EdlParser
 import dev.kneecap.app.export.Media3Exporter
+import dev.kneecap.app.export.PrerenderedOverlay
+import dev.kneecap.app.export.ticksToUs
 import dev.kneecap.app.media.MediaImporter
 import dev.kneecap.app.media.MediaPickerIntents
 import dev.kneecap.app.media.MediaProbe
@@ -487,7 +489,63 @@ class NativeBridgePlugin : Plugin() {
 		ack.put("exportId", exportId)
 		call.resolve(ack)
 
-		Media3Exporter.start(context = context, edl = edl, outputFile = outputFile) { event ->
+		// PRERENDERED OVERLAYS (round 37): full-frame text/caption images the
+		// PREVIEW rendered with its own drawing code. Compositing these
+		// removes `EdlTextOverlay` — a second, drifting implementation of the
+		// editor's text rendering — from the export path. A frame that fails
+		// to decode is skipped rather than failing the export.
+		val overlayFrames = mutableListOf<PrerenderedOverlay.Frame>()
+		call.getArray("overlayFrames")?.let { array ->
+			for (index in 0 until array.length()) {
+				val entry = array.optJSONObject(index) ?: continue
+				val base64 = entry.optString("pngBase64", "")
+				val startTicks = entry.optLong("startTicks", -1)
+				val endTicks = entry.optLong("endTicks", -1)
+				if (base64.isEmpty() || endTicks <= startTicks) continue
+				val bytes = try {
+					android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+				} catch (error: IllegalArgumentException) {
+					null
+				} ?: continue
+				var bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+					?: continue
+				// Normalize to the export resolution. The preview renders its
+				// overlay canvas at the device pixel ratio, so these PNGs
+				// routinely arrive at 2x the project canvas, and media3 draws a
+				// BitmapOverlay at the bitmap's OWN pixel size — which put
+				// double-size, edge-cropped captions in the exported file even
+				// though the frames themselves were pixel-correct.
+				val targetWidth = edl.output.resolutionWidth
+				val targetHeight = edl.output.resolutionHeight
+				if (targetWidth > 0 && targetHeight > 0 &&
+					(bitmap.width != targetWidth || bitmap.height != targetHeight)
+				) {
+					bitmap = android.graphics.Bitmap.createScaledBitmap(
+						bitmap, targetWidth, targetHeight, /* filter= */ true,
+					)
+				}
+				overlayFrames.add(
+					PrerenderedOverlay.Frame(
+						startUs = ticksToUs(startTicks, edl.meta.ticksPerSecond),
+						endUs = ticksToUs(endTicks, edl.meta.ticksPerSecond),
+						bitmap = bitmap,
+					),
+				)
+			}
+		}
+
+		android.util.Log.i(
+			"kneecap-export",
+			"overlay frames decoded=${overlayFrames.size} " +
+				"target=${edl.output.resolutionWidth}x${edl.output.resolutionHeight}",
+		)
+
+		Media3Exporter.start(
+			context = context,
+			edl = edl,
+			outputFile = outputFile,
+			overlayFrames = overlayFrames,
+		) { event ->
 			notifyListeners("exportProgress", exportEventToJson(exportId, event))
 		}
 	}
@@ -593,7 +651,16 @@ class NativeBridgePlugin : Plugin() {
 	 * decoded back into a `File` for a follow-up call (`generateProxy`/
 	 * `generateThumbnails`). Any other scheme is rejected as `UNSUPPORTED`
 	 * rather than guessed at. */
+	/** `handle.uri` reaches native in TWO shapes and both are legitimate: this
+	 *  plugin's own `pickMedia` emits `Uri.fromFile(...)` (`file:///data/...`),
+	 *  while iOS emits — and the JS contract documents (types.ts) — a RAW
+	 *  absolute path with no scheme, which is what iOS's
+	 *  `URL(fileURLWithPath:)` consumes. Accepting only the scheme'd form made
+	 *  every raw-path handle fail `generateProxy`/`generateThumbnails` with
+	 *  UNSUPPORTED (caught on the emulator: video import died while image and
+	 *  audio, which skip this path, sailed through). */
 	private fun fileFromNativeUri(uriString: String): File? {
+		if (uriString.startsWith("/")) return File(uriString)
 		val uri = Uri.parse(uriString)
 		if (uri.scheme != "file") return null
 		val path = uri.path ?: return null

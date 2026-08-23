@@ -65,7 +65,12 @@ data class EdlAsset(
 )
 
 enum class EdlTrackKind { MAIN, OVERLAY, AUDIO }
-enum class EdlTrackType { VIDEO, TEXT, AUDIO, GRAPHIC, EFFECT }
+// CAPTION is a first-class track type on the wire (`EdlTrackType` in
+// editor-core/src/edl/types.ts) — a project with generated captions failed to
+// export at all on Android until this existed, because the parser rejected the
+// whole EDL. Like TEXT, its pixels come from the preview's prerendered overlay
+// frames, so no native builder consumes it beyond parsing.
+enum class EdlTrackType { VIDEO, TEXT, AUDIO, GRAPHIC, EFFECT, CAPTION }
 
 data class EdlTransform(
     val positionX: Double,

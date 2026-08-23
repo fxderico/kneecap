@@ -201,13 +201,16 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 			.find((t) => t.trackId === "track-captions")
 			?.clips.find((c) => c.clipId === "caption-0");
 		expect(captionClip).toBeDefined();
-		expect(captionClip?.captionWords).toHaveLength(5);
+		// Four words: caption-0 is the first PAGE of the segment, and pages
+		// break at CHUNK_MAX_WORDS (see captions/chunk.ts). The fifth word
+		// opens the next page, which is its own element.
+		expect(captionClip?.captionWords).toHaveLength(4);
 		expect(captionClip?.captionWords[0]).toEqual({
 			text: "and",
 			startTicks: 0,
 			endTicks: Math.round(0.3 * TICKS_PER_SECOND),
 		});
-		expect(captionClip?.captionWords[4].text).toBe("Americans,");
+		expect(captionClip?.captionWords[3].text).toBe("fellow");
 		// every non-caption clip carries the same field, always empty.
 		const videoClip = edl.tracks
 			.find((t) => t.trackId === "track-main")
@@ -235,7 +238,8 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 			update: (element) => {
 				if (element.type !== "caption") return element;
 				const words = element.words.slice();
-				words[4] = { ...words[4], text: "citizens," };
+				// Last word of this PAGE (pages hold at most CHUNK_MAX_WORDS).
+				words[3] = { ...words[3], text: "citizens," };
 				return { ...element, words };
 			},
 		});
@@ -246,12 +250,11 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 			"and",
 			"so",
 			"my",
-			"fellow",
 			"citizens,",
 		]);
 		// timing untouched by a text-only edit.
-		expect(edited.words[4].startTime).toBe(captionElement.words[4].startTime);
-		expect(edited.words[4].endTime).toBe(captionElement.words[4].endTime);
+		expect(edited.words[3].startTime).toBe(captionElement.words[3].startTime);
+		expect(edited.words[3].endTime).toBe(captionElement.words[3].endTime);
 
 		const edl = buildEdl({
 			project: buildFixtureProject(),
@@ -262,7 +265,7 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 		const clip = edl.tracks
 			.find((t) => t.trackId === "track-captions")
 			?.clips.find((c) => c.clipId === "caption-0");
-		expect(clip?.captionWords[4].text).toBe("citizens,");
+		expect(clip?.captionWords[3].text).toBe("citizens,");
 	});
 
 	test("applying a style preset (ApplyCaptionStyleCommand's own logic) patches params, and the EDL params passthrough carries it", () => {
@@ -298,7 +301,7 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 			.find((t) => t.trackId === "track-captions")
 			?.clips.find((c) => c.clipId === "caption-0");
 		expect(clip?.params.highlightColor).toBe("#00CAE0");
-		expect(clip?.captionWords).toHaveLength(5);
+		expect(clip?.captionWords).toHaveLength(4);
 	});
 
 	test("applying a preset to ALL captions on a track (the 'Apply to all' primitive) touches every element", () => {
@@ -319,7 +322,8 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 			timelineStartTime: ZERO_MEDIA_TIME,
 			stylePresetId: "classic",
 		}).map((el, i) => ({ ...el, id: `caption-${i}` }) as CaptionElement);
-		expect(elements).toHaveLength(2);
+		// 5-word segment -> two pages, plus the 2-word segment's one page.
+		expect(elements).toHaveLength(3);
 
 		const patch = buildCaptionStyleParamsPatch({ presetId: "minimal" });
 		const restyled = elements.map((el) => ({
@@ -353,8 +357,10 @@ describe("caption pipeline: generate -> insert -> EDL burn-in", () => {
 		expect(activeWordAt(0.1)).toBe("and");
 		expect(activeWordAt(0.35)).toBe("so");
 		expect(activeWordAt(0.55)).toBe("my");
+		// "fellow" is this page's last word and runs to the page's end; the
+		// segment's fifth word lives on the NEXT page, which is a separate
+		// element with its own karaoke timeline.
 		expect(activeWordAt(0.9)).toBe("fellow");
-		expect(activeWordAt(1.8)).toBe("Americans,");
 
 		// And the measured render line marks exactly one word `active` at a
 		// time, in the same order — this is what `CaptionNode`'s

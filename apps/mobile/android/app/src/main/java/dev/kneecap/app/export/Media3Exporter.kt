@@ -61,7 +61,15 @@ object Media3Exporter {
     private var activeTransformer: Transformer? = null
     private var activeMainHandler: Handler? = null
 
-    fun start(context: Context, edl: Edl, outputFile: File, onEvent: (Event) -> Unit) {
+    fun start(
+        context: Context,
+        edl: Edl,
+        outputFile: File,
+        /** Preview-rendered text/caption images (round 37) — see
+         *  `PrerenderedOverlay`. Empty ⇒ the native Spannable fallback. */
+        overlayFrames: List<PrerenderedOverlay.Frame> = emptyList(),
+        onEvent: (Event) -> Unit,
+    ) {
         val mainHandler = Handler(Looper.getMainLooper())
         mainHandler.post {
             if (activeTransformer != null) {
@@ -69,7 +77,7 @@ object Media3Exporter {
                 return@post
             }
             try {
-                val composition = EdlToComposition.buildComposition(edl)
+                val composition = EdlToComposition.buildComposition(edl, overlayFrames)
                 runExport(
                     context = context,
                     composition = composition,
@@ -134,6 +142,18 @@ object Media3Exporter {
                 ) {
                     activeTransformer = null
                     activeMainHandler = null
+                    // media3's own ExportException.message is often just a
+                    // category ("Asset loader error") with the real fault in
+                    // the cause chain, so log both — the message alone sent us
+                    // chasing three different root causes on the emulator.
+                    android.util.Log.e(
+                        "kneecap-export",
+                        "export failed (softwareEncoder=$useSoftwareEncoder) " +
+                            "errorCode=${exportException.errorCode} " +
+                            "message=${exportException.message} " +
+                            "cause=${exportException.cause}",
+                        exportException,
+                    )
                     if (!useSoftwareEncoder) {
                         // Retry tier 2 (plan M9 item 3): same Composition
                         // (already includes the Presentation

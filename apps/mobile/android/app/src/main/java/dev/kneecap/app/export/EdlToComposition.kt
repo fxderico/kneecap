@@ -1,5 +1,6 @@
 package dev.kneecap.app.export
 
+import androidx.media3.common.C
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.SpeedParameters
@@ -9,6 +10,7 @@ import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.transformer.Composition
+import com.google.common.collect.ImmutableList
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
@@ -51,7 +53,14 @@ import dev.kneecap.app.edl.EdlTrackType
  * is a producer bug the exporter should surface immediately, not paper over.
  */
 object EdlToComposition {
-    fun buildComposition(edl: Edl): Composition {
+    fun buildComposition(
+        edl: Edl,
+        /** Preview-rendered text/caption images (round 37). When non-empty
+         *  these REPLACE `EdlTextOverlay`, so the exported overlay layer is
+         *  the editor's own drawing rather than a second implementation of
+         *  it — see `PrerenderedOverlay`. */
+        overlayFrames: List<PrerenderedOverlay.Frame> = emptyList(),
+    ): Composition {
         val tps = edl.meta.ticksPerSecond
         fun us(ticks: Long): Long = ticksToUs(ticks, tps)
 
@@ -64,12 +73,30 @@ object EdlToComposition {
             throw ExportUnsupportedException("main track has no video/image clips")
         }
 
+        // Whole frames per second; a still is emitted at the project's own
+        // rate so its frames line up with the video clips around it.
+        val outputFrameRate = Math.round(
+            edl.output.fps.numerator.toDouble() / edl.output.fps.denominator.toDouble(),
+        ).toInt().coerceAtLeast(1)
+
         val sequences = mutableListOf<EditedMediaItemSequence>()
+        // The project runs to the LAST thing on any track, which is routinely
+        // a caption or title that outlives the final video clip.
+        val mainEndTicks = mainClips.maxOf { it.startTicks + it.durationTicks }
+        val projectEndTicks = maxOf(edl.meta.durationTicks, mainEndTicks)
         val transitionWindows = mutableMapOf<Int, TransitionAlphaMath.Window>()
         val overlaySettingsByIndex = mutableMapOf<Int, StaticOverlaySettings>()
 
         // -- index 0: base sequence, hard-cut, always opaque -----------------
-        var baseSeqBuilder = EditedMediaItemSequence.Builder()
+        // DECLARED track types, not inferred. media3 1.11.0 replaced the
+        // (now-deprecated) experimentalSetForce{Audio,Video}Track flags with
+        // this constructor, and declaring them is what lets a sequence contain
+        // a leading gap, an item with no audio (a still), or an item with no
+        // video (a music clip) — media3 synthesizes silence/blank frames for
+        // the declared-but-absent track instead of failing. Leaving it to be
+        // inferred is what produced, in order on the emulator: the gap
+        // exception, then a released-audio-input crash at 54%.
+        var baseSeqBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
         for (clip in mainClips) {
             baseSeqBuilder = baseSeqBuilder.addItem(
                 buildEditedMediaItem(
@@ -78,9 +105,23 @@ object EdlToComposition {
                     us = ::us,
                     canvasWidth = edl.meta.canvasWidth,
                     canvasHeight = edl.meta.canvasHeight,
-                    removeAudio = mainTrack.muted || clip.muted || !edl.output.includeAudio,
+                    frameRate = outputFrameRate,
+                    outputWidth = edl.output.resolutionWidth,
+                    outputHeight = edl.output.resolutionHeight,
+                    // Video only — the main track's audio rides its own
+                    // sequence (see "audio sequences" below).
+                    removeAudio = true,
                 ),
             )
+        }
+        // Black tail. Without it the video stream simply STOPS at the last
+        // main clip while the overlays (and the audio) run on — an export
+        // whose captions ran past the final clip lost them entirely, and the
+        // file ended up with a 9s video track under a 11.9s audio track. A gap
+        // in a video-declared sequence is exactly the blank-frame filler iOS
+        // gets from its pacer lane.
+        if (mainEndTicks < projectEndTicks) {
+            baseSeqBuilder = baseSeqBuilder.addGap(us(projectEndTicks - mainEndTicks))
         }
         sequences.add(baseSeqBuilder.build())
 
@@ -132,6 +173,7 @@ object EdlToComposition {
                 us = ::us,
                 canvasWidth = edl.meta.canvasWidth,
                 canvasHeight = edl.meta.canvasHeight,
+                frameRate = outputFrameRate,
                 // Audio is a hard cut under a video cross-fade — Media3 has
                 // no mixer-gain-ramp API to crossfade audio the same way
                 // (see TransitionAlphaMath's doc comment); the base
@@ -140,8 +182,19 @@ object EdlToComposition {
                 // here too would double it up during the transition window.
                 removeAudio = true,
             )
-            val overlaySeq = EditedMediaItemSequence.Builder()
-                .addGap(windowStartUs)
+            // A sequence whose FIRST item is a gap has no track to infer its
+            // format from, so Media3 throws "If the first item in the sequence
+            // is a Gap, then forceAudioTrack or forceVideoTrack flag must be
+            // set". This sequence is video-only (`removeAudio = true` above),
+            // so the video track is the one to force — and ONLY when a gap is
+            // actually emitted: forcing a track that the items already supply
+            // makes Media3 generate silence/blank frames alongside the real
+            // samples, which fails later inside the graph rather than here.
+            val overlaySeqBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+            if (windowStartUs > 0) {
+                overlaySeqBuilder.addGap(windowStartUs)
+            }
+            val overlaySeq = overlaySeqBuilder
                 .addItem(overlayItem)
                 .build()
             sequences.add(overlaySeq)
@@ -163,10 +216,18 @@ object EdlToComposition {
                     us = ::us,
                     canvasWidth = edl.meta.canvasWidth,
                     canvasHeight = edl.meta.canvasHeight,
+                    frameRate = outputFrameRate,
+                    outputWidth = edl.output.resolutionWidth,
+                    outputHeight = edl.output.resolutionHeight,
                     removeAudio = true, // PiP/overlay visual layers are silent in v1.
                 )
-                val seq = EditedMediaItemSequence.Builder()
-                    .addGap(us(clip.startTicks))
+                // Gap-first sequence, video-only — same rule as the
+                // transition sequence above.
+                val seqBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+                if (clip.startTicks > 0) {
+                    seqBuilder.addGap(us(clip.startTicks))
+                }
+                val seq = seqBuilder
                     .addItem(item)
                     .build()
                 sequences.add(seq)
@@ -179,12 +240,31 @@ object EdlToComposition {
             }
         }
 
-        // -- audio-only tracks -------------------------------------------------
-        for (track in edl.tracks.filter { it.kind == EdlTrackKind.AUDIO }) {
-            if (track.clips.isEmpty()) continue
-            var seqBuilder = EditedMediaItemSequence.Builder()
+        // -- audio sequences ---------------------------------------------------
+        // ALL audio — the main track's own clip audio included — travels in
+        // dedicated audio-only sequences, gap-padded across the project's full
+        // length. The base sequence above is video-only for a reason: a
+        // sequence that declares an audio track but contains an item with no
+        // audio (a still, which is normal on a main track) had its audio input
+        // released the moment that item started, while the previous item's
+        // renderer was still feeding it — media3 then failed the whole export
+        // with a bare "Asset loader error" at exactly the video->image
+        // boundary (reproduced on the emulator at ~50% of a 6s-video +
+        // 6s-image timeline). Splitting audio out means every audio sequence
+        // holds audio for its entire length, and silence is expressed as a gap
+        // (which media3 fills), not as a silent item.
+        /** One audio-only sequence: clips in order, gaps everywhere else. */
+        fun addAudioSequence(clips: List<EdlClip>, trackMuted: Boolean) {
+            val audible = clips
+                .filter { clip ->
+                    !trackMuted && !clip.muted && edl.output.includeAudio &&
+                        requireAsset(edl, clip).kind != EdlAssetKind.IMAGE
+                }
+                .sortedBy { it.startTicks }
+            if (audible.isEmpty()) return
+            var seqBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
             var cursorTicks = 0L
-            for (clip in track.clips.sortedBy { it.startTicks }) {
+            for (clip in audible) {
                 if (clip.startTicks > cursorTicks) {
                     seqBuilder = seqBuilder.addGap(us(clip.startTicks - cursorTicks))
                 }
@@ -195,17 +275,36 @@ object EdlToComposition {
                         us = ::us,
                         canvasWidth = edl.meta.canvasWidth,
                         canvasHeight = edl.meta.canvasHeight,
-                        removeAudio = track.muted || clip.muted || !edl.output.includeAudio,
+                        frameRate = outputFrameRate,
+                        outputWidth = edl.output.resolutionWidth,
+                        outputHeight = edl.output.resolutionHeight,
+                        removeAudio = false,
                         removeVideo = true,
                     ),
                 )
                 cursorTicks = clip.startTicks + clip.durationTicks
             }
+            // Trailing silence: a music clip is routinely shorter than the
+            // video under it, and a sequence that just ENDS is torn down while
+            // the composition still runs — the same released-input failure.
+            if (cursorTicks < projectEndTicks) {
+                seqBuilder = seqBuilder.addGap(us(projectEndTicks - cursorTicks))
+            }
             sequences.add(seqBuilder.build())
         }
 
+        addAudioSequence(mainClips, mainTrack.muted)
+        for (track in edl.tracks.filter { it.kind == EdlTrackKind.AUDIO }) {
+            addAudioSequence(track.clips, track.muted)
+        }
+
         // -- text/caption overlays: one composition-level OverlayEffect -----
-        val textOverlays = edl.overlays
+        // Preview-rendered frames win when supplied; the native Spannable
+        // renderer below stays as the fallback for callers that send none.
+        val textOverlays: List<androidx.media3.effect.TextureOverlay> =
+            if (overlayFrames.isNotEmpty()) {
+                listOf(PrerenderedOverlay(overlayFrames))
+            } else edl.overlays
             .filter { it.kind == EdlOverlayKind.TEXT || it.kind == EdlOverlayKind.CAPTION }
             .sortedBy { it.zIndex }
             .mapNotNull { overlay ->
@@ -230,7 +329,7 @@ object EdlToComposition {
             )
         }
         if (textOverlays.isNotEmpty()) {
-            compositionVideoEffects.add(OverlayEffect(textOverlays))
+            compositionVideoEffects.add(OverlayEffect(ImmutableList.copyOf(textOverlays)))
         }
 
         val compositorSettings = CrossfadeCompositorSettings(
@@ -239,8 +338,20 @@ object EdlToComposition {
             outputSize = Size(edl.output.resolutionWidth, edl.output.resolutionHeight),
         )
 
-        return Composition.Builder(sequences)
-            .setVideoCompositorSettings(compositorSettings)
+        // `nextIndex` ended as the count of VIDEO-producing sequences (index 0
+        // is the base track; each cross-fade window and each PiP overlay clip
+        // added one more). Media3 builds a SingleInputVideoGraph when there is
+        // only one of them, and that graph throws
+        // "SingleInputVideoGraph does not use VideoCompositor, and therefore
+        // cannot apply VideoCompositorSettings" from its constructor — so a
+        // plain project with no transition and no overlay clip could never
+        // export at all (caught on the emulator; the audio-only sequences
+        // appended after this counter do not make the graph multi-input).
+        val builder = Composition.Builder(sequences)
+        if (nextIndex > 1) {
+            builder.setVideoCompositorSettings(compositorSettings)
+        }
+        return builder
             .setEffects(Effects(emptyList(), compositionVideoEffects))
             .build()
     }
@@ -270,6 +381,9 @@ object EdlToComposition {
         canvasHeight: Int,
         removeAudio: Boolean,
         removeVideo: Boolean = false,
+        frameRate: Int = 30,
+        outputWidth: Int = 0,
+        outputHeight: Int = 0,
     ): EditedMediaItem {
         if (clip.hasMasks) {
             throw ExportUnsupportedException(
@@ -292,7 +406,18 @@ object EdlToComposition {
         val isImage = clip.kind == "image" || asset.kind == EdlAssetKind.IMAGE
 
         val mediaItemBuilder = MediaItem.Builder().setUri(sourceUri)
-        if (!isImage) {
+        if (isImage) {
+            // A still has no track of its own to decode, so media3 asks the
+            // MediaItem how long to synthesize one for. Without this the image
+            // asset loader reports no output track and the export dies partway
+            // with "The asset loader has no audio or video track to output" —
+            // reported only as a generic "Asset loader error" (this is the one
+            // that survived three earlier fixes on the emulator). The
+            // EditedMediaItem's own `setDurationUs` below is NOT a substitute;
+            // both are required, and `setFrameRate` tells it how many frames
+            // to emit across that span.
+            mediaItemBuilder.setImageDurationMs(us(clip.durationTicks) / 1_000)
+        } else {
             mediaItemBuilder.setClippingConfiguration(
                 MediaItem.ClippingConfiguration.Builder()
                     .setStartPositionUs(us(clip.sourceStartTicks))
@@ -309,6 +434,25 @@ object EdlToComposition {
             videoEffects.add(AlphaScale(clip.opacity.toFloat()))
         }
 
+        // Normalize every visual item to the export resolution HERE, per
+        // item, not only through the composition-level Presentation: media3
+        // pulls a trailing composition Presentation out of the effect chain to
+        // size the encoder, so it runs AFTER the composition's OverlayEffect.
+        // That left the preview-rendered overlays compositing onto
+        // proxy-sized frames and coming out magnified and edge-cropped in the
+        // exported file, while being pixel-correct in the preview. With this,
+        // frames reaching the overlay stage are already at output size and the
+        // overlay is a true 1:1 blit.
+        if (!removeVideo && outputWidth > 0 && outputHeight > 0) {
+            videoEffects.add(
+                Presentation.createForWidthAndHeight(
+                    outputWidth,
+                    outputHeight,
+                    Presentation.LAYOUT_SCALE_TO_FIT,
+                ),
+            )
+        }
+
         val builder = EditedMediaItem.Builder(mediaItemBuilder.build())
             .setRemoveAudio(removeAudio || !asset.hasAudio)
             .setRemoveVideo(removeVideo)
@@ -316,6 +460,7 @@ object EdlToComposition {
 
         if (isImage) {
             builder.setDurationUs(us(clip.durationTicks))
+            builder.setFrameRate(frameRate)
         }
         if (clip.speed.numerator != clip.speed.denominator) {
             builder.setSpeed(

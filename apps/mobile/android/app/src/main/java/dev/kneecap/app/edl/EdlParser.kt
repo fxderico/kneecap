@@ -106,6 +106,7 @@ object EdlParser {
         "audio" -> EdlTrackType.AUDIO
         "graphic" -> EdlTrackType.GRAPHIC
         "effect" -> EdlTrackType.EFFECT
+        "caption" -> EdlTrackType.CAPTION
         else -> throw EdlParseException("unknown track type '$raw'")
     }
 

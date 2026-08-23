@@ -40,12 +40,16 @@ const FIXTURE_SEGMENTS: TranscriptSegmentInput[] = [
 ];
 
 describe("buildCaptionElementsFromTranscript", () => {
-	test("produces one caption element per segment", () => {
+	// One element per caption PAGE, not per segment: generation chunks a
+	// segment at CHUNK_MAX_WORDS (4) so a long sentence never sits on screen
+	// as one wall of text. The fixture's 5-word segment therefore yields two
+	// pages (4 + 1) and its 2-word segment one, for three elements.
+	test("produces one caption element per chunked page", () => {
 		const elements = buildCaptionElementsFromTranscript({
 			segments: FIXTURE_SEGMENTS,
 			timelineStartTime: ZERO_MEDIA_TIME,
 		});
-		expect(elements).toHaveLength(2);
+		expect(elements).toHaveLength(3);
 		expect(elements.every((e) => e.type === "caption")).toBe(true);
 	});
 
@@ -54,12 +58,15 @@ describe("buildCaptionElementsFromTranscript", () => {
 			segments: FIXTURE_SEGMENTS,
 			timelineStartTime: ZERO_MEDIA_TIME,
 		});
-		// 1.0s and 2.5s at TICKS_PER_SECOND, both exact (no rounding needed for
-		// whole/tenth-second inputs at a 120000 tick rate).
+		// Each page spans exactly its own words (page 1: 1.0->2.0, page 2:
+		// 2.0->3.5, page 3: 4.0->5.0), all exact — no rounding is needed for
+		// whole/tenth-second inputs at a 120000 tick rate.
 		expect(elements[0].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 1 }));
-		expect(elements[0].duration).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 2.5 }));
-		expect(elements[1].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 4 }));
-		expect(elements[1].duration).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 1 }));
+		expect(elements[0].duration).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 1 }));
+		expect(elements[1].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 2 }));
+		expect(elements[1].duration).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 1.5 }));
+		expect(elements[2].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 4 }));
+		expect(elements[2].duration).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 1 }));
 	});
 
 	test("offsets segment start times by timelineStartTime so captions land in sync with the transcribed clip", () => {
@@ -69,22 +76,23 @@ describe("buildCaptionElementsFromTranscript", () => {
 			timelineStartTime: offset,
 		});
 		expect(elements[0].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 11 }));
-		expect(elements[1].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 14 }));
+		expect(elements[1].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 12 }));
+		expect(elements[2].startTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 14 }));
 	});
 
-	test("word times are relative to their OWN segment's start, not the transcript's absolute start", () => {
+	test("word times are relative to their OWN page's start, not the transcript's absolute start", () => {
 		const elements = buildCaptionElementsFromTranscript({
 			segments: FIXTURE_SEGMENTS,
 			timelineStartTime: ZERO_MEDIA_TIME,
 		});
 		if (elements[0].type !== "caption") throw new Error("expected caption element");
 		const words = elements[0].words;
-		expect(words).toHaveLength(5);
+		expect(words).toHaveLength(4);
 		expect(words[0].text).toBe("and");
-		expect(words[0].startTime).toBe(ZERO_MEDIA_TIME); // segment's own word 0 starts at t=0
-		expect(words[4].text).toBe("Americans");
-		// last word ends exactly at the segment's own duration (3.5s - 1.0s = 2.5s)
-		expect(words[4].endTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 2.5 }));
+		expect(words[0].startTime).toBe(ZERO_MEDIA_TIME); // page's own word 0 starts at t=0
+		expect(words[3].text).toBe("fellow");
+		// last word ends exactly at the page's own duration (2.0s - 1.0s = 1.0s)
+		expect(words[3].endTime).toBe(mediaTime({ ticks: TICKS_PER_SECOND * 1 }));
 	});
 
 	test("word times are monotonically non-decreasing within a segment", () => {
@@ -122,7 +130,7 @@ describe("buildCaptionElementsFromTranscript", () => {
 			],
 			timelineStartTime: ZERO_MEDIA_TIME,
 		});
-		expect(elements).toHaveLength(2);
+		expect(elements).toHaveLength(3);
 	});
 
 	test("applies the default style preset's params when none is given", () => {

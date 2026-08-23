@@ -89,7 +89,10 @@ describe("smoothWordTimings — synthetic rule coverage", () => {
 			],
 		});
 		expect(words).toHaveLength(2);
-		expect(words[0].text).toBe(" hello,");
+		// Whisper's leading space is stripped on the way out: every consumer
+		// downstream joins words with its own separator (`chunk.ts` uses
+		// `join(" ")`), so keeping it produced doubled spaces in real captions.
+		expect(words[0].text).toBe("hello,");
 		// The merged word's end is the WORD's own end (400ms), never the
 		// punctuation token's own unreliable 4.9s estimate.
 		expect(words[0].endMicros).toBe(400_000);

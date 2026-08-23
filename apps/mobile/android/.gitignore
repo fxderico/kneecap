@@ -106,3 +106,8 @@ app/src/main/res/xml/config.xml
 # the build pipeline; the model itself is 142MB+ and license-distinct from
 # this repo's own MIT code).
 app/src/main/assets/models/*.bin
+
+# kneecap: whisper.cpp C/C++ sources for libkneecap_whisper.so. Fetched at
+# build time by scripts/fetch-whisper-cpp.sh (pinned tag) — third-party
+# source this repo does not own, same policy as the model weights above.
+app/src/main/cpp/whisper.cpp/

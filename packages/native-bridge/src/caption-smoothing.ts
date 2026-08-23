@@ -83,6 +83,10 @@ export interface SmoothingStats {
 	/** Punctuation-only tokens whose own (unreliable) timestamp was
 	 * discarded and glued textually onto the preceding word instead. */
 	punctuationMerged: number;
+	/** BPE sub-word tokens (no leading space) glued onto the word they
+	 *  continue — see the merge loop for why a leading space is the only
+	 *  word-boundary signal whisper gives. */
+	subwordMerged: number;
 	/** Raw DTW starts rejected because they fell outside the segment
 	 * envelope (segment-bounds is the outermost sanity check, applied
 	 * before the ordering pass even runs). */
@@ -161,6 +165,7 @@ export function smoothWordTimings({
 	const stats: SmoothingStats = {
 		inputTokens: tokens.length,
 		punctuationMerged: 0,
+		subwordMerged: 0,
 		dtwRejectedOutOfSegment: 0,
 		monotonicityFixed: 0,
 		gapsClamped: 0,
@@ -168,6 +173,13 @@ export function smoothWordTimings({
 	};
 
 	const nonEmpty = tokens.filter((t) => t.text.trim().length > 0);
+
+	// Does this producer mark word starts with a leading space? whisper.cpp
+	// does (BPE); iOS's speech engines hand back whole words and do not. The
+	// sub-word merge below is only correct for the former, so it is decided
+	// per segment from the tokens themselves rather than by asking the caller
+	// which platform it is on.
+	const marksWordsWithLeadingSpace = nonEmpty.some((t) => /^\s/.test(t.text));
 
 	// --- Stage 0: resolve each token's provisional (start, end), clamped to
 	// the segment envelope. This is the "interpolate outliers against
@@ -209,8 +221,33 @@ export function smoothWordTimings({
 			stats.punctuationMerged++;
 			continue;
 		}
+		// Sub-word continuation. Whisper's vocabulary is BPE, so a word longer
+		// than one token arrives split, and the ONLY marker of a word boundary
+		// is a leading space on the token that opens it: "captions" comes back
+		// as " capt" + "ions", "kneecap" as " kne" + "ec" + "ap". Emitting
+		// those as separate words produced literal "capt ions on the kne ec ap"
+		// captions on the first real Android transcription. A continuation
+		// takes the previous word's start and extends its end — the whole word
+		// is on screen for the union of its tokens' spans.
+		//
+		// Gated on the segment actually USING that convention (see
+		// `marksWordsWithLeadingSpace`): a source that already hands back whole
+		// words with no leading spaces — iOS's speech engines, and this
+		// module's own synthetic tests — would otherwise have its entire
+		// segment glued into one long word.
+		if (marksWordsWithLeadingSpace && !/^\s/.test(w.text) && merged.length > 0) {
+			const prev = merged[merged.length - 1];
+			prev.text += w.text;
+			prev.end = Math.max(prev.end, w.end);
+			prev.sourceLength = prev.text.trim().length || 1;
+			stats.subwordMerged++;
+			continue;
+		}
 		merged.push({
-			text: w.text,
+			// Trimmed here, once: every consumer downstream (caption page
+			// layout, the EDL, the preview renderer) joins words with its own
+			// separator, so keeping whisper's leading space would double it.
+			text: w.text.trim(),
 			start: w.start,
 			end: w.end,
 			confidence: w.confidence,

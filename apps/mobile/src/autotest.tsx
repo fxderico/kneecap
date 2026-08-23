@@ -586,7 +586,11 @@ async function driveAndSample({
 	let captionsDetail = "not-run";
 	try {
 		const { generateCaptions, getAllCaptions } = await import("@kneecap/mobile-ui");
-		const timeoutMs = 240_000; // first run may download a locale model
+		// Generous: the first run may download a locale model (iOS), and
+		// whisper.cpp on an emulated arm64 CPU (Android) runs several times
+		// slower than on real silicon — 240s was enough for the device but
+		// flaked on the emulator.
+		const timeoutMs = 420_000;
 		const result = await Promise.race([
 			generateCaptions({ editor, stylePresetId: "simple" }),
 			new Promise<never>((_, reject) =>

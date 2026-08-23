@@ -267,7 +267,7 @@ describe("createCapacitorBridge (production path, real @capacitor/core, no nativ
 				],
 			});
 			expect(segments[0].words).toHaveLength(1);
-			expect(segments[0].words[0].text).toBe(" hi,");
+			expect(segments[0].words[0].text).toBe("hi,");
 		});
 	});
 
