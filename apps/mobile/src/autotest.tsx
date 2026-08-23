@@ -267,7 +267,7 @@ async function runPhase({
 			element: buildTextElement({
 				raw: {
 					name: "autotest-text",
-					duration: mediaTimeFromSeconds({ seconds: 4 }),
+					duration: mediaTimeFromSeconds({ seconds: 2 }),
 					params: {
 						// Two lines + a trailing caption underneath: round 34
 					// regression coverage for "line breaks are not registering
@@ -278,9 +278,21 @@ async function runPhase({
 						strokeColor: "#000000",
 						strokeWidth: 2,
 						fontWeight: "bold",
+						// PINCH-SCALED (round 36 regression coverage): the
+						// preview rasterizes glyphs from vectors at the scaled
+						// size, so the export must too — rasterizing at 1× and
+						// letting the compositor resample produced the soft,
+						// thin text on every scaled overlay. At 1.5× the
+						// exported stem must still measure the font's true
+						// weight (16.2px × 1.5 ≈ 24px), not a blurred 1× raster.
+						"transform.scaleX": 1.5,
+						"transform.scaleY": 1.5,
 					},
 				},
-				startTime: mediaTimeFromSeconds({ seconds: 0 }),
+				// Over the BLACK tail (past the last video clip) so the
+				// exported glyph "ink" can be measured exactly against the
+				// preview's — see the fontprobe ink log below.
+				startTime: mediaTimeFromSeconds({ seconds: 9.5 }),
 			}),
 			placement: { mode: "newTrack", trackType: "text" },
 		}),
@@ -479,6 +491,65 @@ async function driveAndSample({
 		: audio.contextState === "running" &&
 			audio.failedSinks === 0 &&
 			audio.activeSinks + audio.decodedBuffers > 0;
+	// FONT PROBE (round 36): measure what the APP'S OWN preview canvas draws
+	// — same face, size and weight the text overlay uses — so it can be
+	// compared numerically against the exported frame. The WebGPU preview
+	// canvas can't be read back (WebKit clears it post-present), but text
+	// reaches it through a 2D context, so an offscreen 2D canvas is the
+	// faithful stand-in. Albert Sans Bold at 120px measures cap 84px /
+	// stem 16.2px in the font's own outlines.
+	try {
+		const fontsApi = document.fonts;
+		await fontsApi.load('bold 120px "Albert Sans"');
+		await fontsApi.load('120px "Albert Sans"');
+		const probe = document.createElement("canvas");
+		probe.width = 900;
+		probe.height = 300;
+		const pctx = probe.getContext("2d", { willReadFrequently: true });
+		if (pctx) {
+			pctx.fillStyle = "#000";
+			pctx.fillRect(0, 0, 900, 300);
+			pctx.font = 'normal bold 120px "Albert Sans", sans-serif';
+			pctx.fillStyle = "#fff";
+			pctx.textAlign = "center";
+			pctx.textBaseline = "middle";
+			pctx.fillText("HH", 450, 150);
+			const data = pctx.getImageData(0, 0, 900, 300).data;
+			const isW = (x: number, y: number) => data[(y * 900 + x) * 4] > 200;
+			const rows: number[] = [];
+			for (let y = 0; y < 300; y++) {
+				for (let x = 0; x < 900; x += 2) {
+					if (isW(x, y)) { rows.push(y); break; }
+				}
+			}
+			if (rows.length > 0) {
+				const top = Math.min(...rows);
+				const bottom = Math.max(...rows);
+				const sampleY = top + Math.round((bottom - top) * 0.25);
+				const stems: number[] = [];
+				let run = 0;
+				for (let x = 0; x < 900; x++) {
+					if (isW(x, sampleY)) run++;
+					else { if (run > 0) stems.push(run); run = 0; }
+				}
+				// INK = summed luminance / 255 over the glyph box: the
+				// perceptual "how much of the letter is painted" measure,
+				// independent of any threshold. The export is measured the
+				// same way off a frame where the text sits on black.
+				let ink = 0;
+				for (let i = 0; i < data.length; i += 4) ink += data[i] / 255;
+				log(
+					`fontprobe check(bold)=${fontsApi.check('bold 120px "Albert Sans"')} ` +
+						`check(regular)=${fontsApi.check('120px "Albert Sans"')} ` +
+						`capHeight=${bottom - top + 1}px stems=${JSON.stringify(stems)} ` +
+						`ink=${ink.toFixed(0)} (font outlines: cap 84px, stem 16.2px)`,
+				);
+			}
+		}
+	} catch (error) {
+		log("fontprobe failed:", error);
+	}
+
 	// CAPTIONS (round 30): whole-timeline transcription. The planted VIDEO's
 	// audio is a pure sine tone (no speech); the planted AUDIO-track clip is
 	// real synthesized SPEECH — so any caption appearing at all proves the

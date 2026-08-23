@@ -85,8 +85,18 @@ public enum OverlayLayerBuilder {
 	) -> OverlayBillboard? {
 		guard let content = clip.params["content"]?.asString, !content.isEmpty else { return nil }
 		let authoredFontSize = CGFloat(clip.params["fontSize"]?.asDouble ?? 48)
-		let fontSize = authoredFontSize * (renderSize.height / fontSizeScaleReference)
-		let fontSizeRatio = authoredFontSize / 15
+		// RASTERIZE AT FINAL SIZE (round 36): the preview applies the clip's
+		// transform with `ctx.scale(...)` BEFORE drawing, so glyphs are
+		// rasterized from vectors at their final on-screen size. The export
+		// used to rasterize at 1× and let the compositor resample the bitmap
+		// into a scaled rect — soft, washed-out, thinner-looking text on any
+		// pinch-scaled overlay. Baking the scale into the raster and handing
+		// the compositor a 1:1 rect removes the resample entirely.
+		let scaleX = abs(CGFloat(clip.transform.scaleX))
+		let scaleY = abs(CGFloat(clip.transform.scaleY))
+		let rasterScale = max(scaleY, 0.01)
+		let fontSize = authoredFontSize * (renderSize.height / fontSizeScaleReference) * rasterScale
+		let fontSizeRatio = authoredFontSize / 15 * rasterScale
 		let color = cgColor(fromHex: clip.params["color"]?.asString ?? "#FFFFFF")
 		let bold = (clip.params["fontWeight"]?.asString ?? "normal") == "bold"
 		let italic = (clip.params["fontStyle"]?.asString ?? "normal") == "italic"
@@ -102,8 +112,9 @@ public enum OverlayLayerBuilder {
 		let strokeColor = cgColor(fromHex: clip.params["strokeColor"]?.asString ?? "#000000")
 
 		let lineHeightPx = fontSize * CGFloat(clip.params["lineHeight"]?.asDouble ?? 1.2)
-		// NOT height-scaled — the preview uses this param as raw canvas px too.
-		let letterSpacing = CGFloat(clip.params["letterSpacing"]?.asDouble ?? 0)
+		// NOT height-scaled — the preview uses this param as raw canvas px —
+		// but the clip transform DOES scale it (ctx.scale precedes the draw).
+		let letterSpacing = CGFloat(clip.params["letterSpacing"]?.asDouble ?? 0) * rasterScale
 		let align = clip.params["textAlign"]?.asString ?? "center"
 
 		let lines = content.components(separatedBy: "\n")
@@ -188,7 +199,11 @@ public enum OverlayLayerBuilder {
 			contentHeight: imageHeight,
 			transform: clip.transform,
 			renderSize: renderSize,
-			positionFractionY: 0
+			positionFractionY: 0,
+			// The raster already carries `rasterScale` (== scaleY); only a
+			// non-uniform aspect difference is left for the compositor.
+			widthScale: scaleX / rasterScale,
+			heightScale: 1
 		)
 		return OverlayBillboard(
 			states: [OverlayBillboardState(startSeconds: 0, image: CIImage(cgImage: image))],
@@ -318,7 +333,13 @@ public enum OverlayLayerBuilder {
 		guard !visible.isEmpty else { return nil }
 
 		let style = readCaptionStyle(clip: clip)
-		let scaledFontSize = style.fontSize * (renderSize.height / fontSizeScaleReference)
+		// Rasterize at final size — see buildTextBillboard (round 36).
+		// Captions are pinch-scaled as a family, so this path matters just as
+		// much as text.
+		let captionScaleX = abs(CGFloat(clip.transform.scaleX))
+		let captionScaleY = abs(CGFloat(clip.transform.scaleY))
+		let captionRasterScale = max(captionScaleY, 0.01)
+		let scaledFontSize = style.fontSize * (renderSize.height / fontSizeScaleReference) * captionRasterScale
 		guard scaledFontSize > 1 else { return nil }
 		let font = resolveFont(family: style.fontFamily, bold: style.bold, size: scaledFontSize)
 
@@ -395,7 +416,10 @@ public enum OverlayLayerBuilder {
 			contentHeight: totalHeight + padding * 2,
 			transform: clip.transform,
 			renderSize: renderSize,
-			positionFractionY: style.positionFractionY
+			positionFractionY: style.positionFractionY,
+			// Raster already carries captionRasterScale (== scaleY).
+			widthScale: captionScaleX / captionRasterScale,
+			heightScale: 1
 		)
 		return OverlayBillboard(
 			states: states,
@@ -419,7 +443,7 @@ public enum OverlayLayerBuilder {
 			color: cgColor(fromHex: p["color"]?.asString ?? "#ffffff"),
 			highlightColor: cgColor(fromHex: p["highlightColor"]?.asString ?? "#FFDE59"),
 			strokeColor: cgColor(fromHex: p["strokeColor"]?.asString ?? "#000000"),
-			strokeWidth: CGFloat(p["strokeWidth"]?.asDouble ?? 6),
+			strokeWidth: CGFloat(p["strokeWidth"]?.asDouble ?? 2),
 			backgroundEnabled: p["background.enabled"]?.asBool ?? false,
 			backgroundColor: cgColor(fromHex: p["background.color"]?.asString ?? "#000000"),
 			activeWordBackgroundEnabled: p["activeWordBackground.enabled"]?.asBool ?? false,
@@ -497,17 +521,25 @@ public enum OverlayLayerBuilder {
 	/// Final display rect in OUTPUT pixels, top-left/+Y-down convention:
 	/// canvas order translate(center + position + preset baseline) then
 	/// scale about the element's own center.
+	/// `widthScale`/`heightScale` are the transform scale factors STILL to be
+	/// applied to the rasterized bitmap. Billboards now rasterize at their
+	/// final on-screen size (round 36), so they pass 1 (or just the residual
+	/// aspect ratio) instead of the raw transform scale — a bitmap stretched
+	/// by the compositor is resampled, and an upscaled raster is exactly the
+	/// soft, thin-looking text the founder kept seeing on scaled overlays.
 	private static func displayRect(
 		contentWidth: CGFloat,
 		contentHeight: CGFloat,
 		transform: EdlTransform,
 		renderSize: CGSize,
-		positionFractionY: CGFloat
+		positionFractionY: CGFloat,
+		widthScale: CGFloat,
+		heightScale: CGFloat
 	) -> CGRect {
 		let centerX = renderSize.width / 2 + CGFloat(transform.positionX)
 		let centerY = renderSize.height / 2 + CGFloat(transform.positionY) + positionFractionY * renderSize.height
-		let width = contentWidth * abs(CGFloat(transform.scaleX))
-		let height = contentHeight * abs(CGFloat(transform.scaleY))
+		let width = contentWidth * widthScale
+		let height = contentHeight * heightScale
 		return CGRect(x: centerX - width / 2, y: centerY - height / 2, width: width, height: height)
 	}
 
@@ -538,6 +570,12 @@ public enum OverlayLayerBuilder {
 		in ctx: CGContext
 	) {
 		guard !text.isEmpty else { return }
+		// The preview strokes with `lineJoin = lineCap = "round"`; CoreText
+		// inherits the CONTEXT's join/cap, which default to miter/butt —
+		// sharp corners spike outward and read as a harder, spikier border
+		// than the editor shows. Match the canvas.
+		ctx.setLineJoin(.round)
+		ctx.setLineCap(.round)
 		var base: [NSAttributedString.Key: Any] = [
 			NSAttributedString.Key(kCTFontAttributeName as String): font
 		]
