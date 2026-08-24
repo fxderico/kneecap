@@ -127,6 +127,9 @@ object Media3Exporter {
         }
 
         val transformer = Transformer.Builder(context)
+            // Brickwall across the summed mix — see LimitingAudioMixer for why
+            // this is the only reachable place to do it.
+            .setAudioMixerFactory(LimitingAudioMixer.Factory())
             .setEncoderFactory(encoderFactoryBuilder.build())
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(finishedComposition: Composition, exportResult: ExportResult) {

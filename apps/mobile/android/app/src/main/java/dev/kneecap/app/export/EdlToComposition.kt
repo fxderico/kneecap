@@ -253,15 +253,25 @@ object EdlToComposition {
         // 6s-image timeline). Splitting audio out means every audio sequence
         // holds audio for its entire length, and silence is expressed as a gap
         // (which media3 fills), not as a silent item.
-        /** One audio-only sequence: clips in order, gaps everywhere else. */
-        fun addAudioSequence(clips: List<EdlClip>, trackMuted: Boolean) {
-            val audible = clips
+        /** The clips of one audio-only sequence: audible, in time order. */
+        fun audibleClips(clips: List<EdlClip>, trackMuted: Boolean): List<EdlClip> =
+            clips
                 .filter { clip ->
                     !trackMuted && !clip.muted && edl.output.includeAudio &&
                         requireAsset(edl, clip).kind != EdlAssetKind.IMAGE
                 }
                 .sortedBy { it.startTicks }
-            if (audible.isEmpty()) return
+
+        // The summed mix is limited by `LimitingAudioMixer` (installed on the
+        // Transformer), so nothing here needs to reserve headroom.
+        val audioSources = buildList {
+            add(audibleClips(mainClips, mainTrack.muted))
+            for (track in edl.tracks.filter { it.kind == EdlTrackKind.AUDIO }) {
+                add(audibleClips(track.clips, track.muted))
+            }
+        }.filter { it.isNotEmpty() }
+
+        fun addAudioSequence(audible: List<EdlClip>) {
             var seqBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
             var cursorTicks = 0L
             for (clip in audible) {
@@ -293,10 +303,7 @@ object EdlToComposition {
             sequences.add(seqBuilder.build())
         }
 
-        addAudioSequence(mainClips, mainTrack.muted)
-        for (track in edl.tracks.filter { it.kind == EdlTrackKind.AUDIO }) {
-            addAudioSequence(track.clips, track.muted)
-        }
+        for (source in audioSources) addAudioSequence(source)
 
         // -- text/caption overlays: one composition-level OverlayEffect -----
         // Preview-rendered frames win when supplied; the native Spannable
@@ -352,7 +359,12 @@ object EdlToComposition {
             builder.setVideoCompositorSettings(compositorSettings)
         }
         return builder
-            .setEffects(Effects(emptyList(), compositionVideoEffects))
+            .setEffects(
+                Effects(
+                    emptyList(),
+                    compositionVideoEffects,
+                ),
+            )
             .build()
     }
 
@@ -456,7 +468,18 @@ object EdlToComposition {
         val builder = EditedMediaItem.Builder(mediaItemBuilder.build())
             .setRemoveAudio(removeAudio || !asset.hasAudio)
             .setRemoveVideo(removeVideo)
-            .setEffects(Effects(emptyList(), videoEffects))
+            // Per-clip volume. Parsed since M9 but never applied on Android —
+            // the slider was a no-op in every Android export until now.
+            .setEffects(
+                Effects(
+                    if (removeAudio) {
+                        emptyList()
+                    } else {
+                        listOf(ClipGainAudioProcessor(clip.volumeDb))
+                    },
+                    videoEffects,
+                ),
+            )
 
         if (isImage) {
             builder.setDurationUs(us(clip.durationTicks))

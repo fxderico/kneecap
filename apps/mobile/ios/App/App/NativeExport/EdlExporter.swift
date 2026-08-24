@@ -142,7 +142,14 @@ public enum EdlExporter {
 				AVNumberOfChannelsKey: 2,
 			])
 			out.audioMix = built.audioMix
-			out.alwaysCopiesSampleData = false
+			// MUST copy: the limiter below rewrites these samples in place, and
+			// with `false` the reader vends buffers backed by memory it still
+			// owns. Those writes were silently discarded — the exported audio
+			// was byte-for-byte identical with the limiter running and with it
+			// removed, which is why "audio rips at 1000%" survived a fix that
+			// measured its own limiter working. The video output stays
+			// zero-copy; nothing mutates those.
+			out.alwaysCopiesSampleData = true
 			if reader.canAdd(out) {
 				reader.add(out)
 				audioOutput = out
@@ -328,20 +335,115 @@ public enum EdlExporter {
 	/// happened inside `AVAssetReaderVideoCompositionOutput` before this
 	/// function ever sees a sample buffer.
 
-	/// A real feed-forward peak LIMITER over the export's float PCM.
+	/// LOOK-AHEAD BRICKWALL LIMITER over the export's float PCM.
 	///
-	/// The volume control reaches 1000% (+20 dB), so the summed mix can run
-	/// far past full scale — measured 7.5× on a boosted clip. Anything that
-	/// merely ceilings those samples (an encoder's clamp, or a soft knee
-	/// with only 1 dB of headroom) squares the waveform off, which is the
-	/// tearing the founder heard: "audio rips when i do 1000x".
+	/// The volume control reaches 1000% (+20 dB), so the summed mix runs far
+	/// past full scale and something has to bring it back. Round 39's
+	/// feed-forward version could not: it derived the gain from samples as
+	/// they arrived, so on any sudden onset the gain was still ~1 when the
+	/// peak went through and a final `min(ceiling, max(-ceiling, …))` clamp
+	/// squared the waveform off. Measured offline on synthetic speech boosted
+	/// 10x: 46 clipped runs per second, the longest 2.06 ms of flat top —
+	/// audible tearing on every syllable, which is what the founder kept
+	/// hearing after that "fix". (Its own verification passed because it
+	/// counted samples sitting exactly on the ceiling in the DECODED AAC,
+	/// where lossy coding moves every sample slightly off that value. Never
+	/// measure clipping after a lossy round trip.)
 	///
-	/// This instead REDUCES GAIN so the peaks fit, preserving the waveform's
-	/// shape: a fast-attack / slow-release envelope follower drives a gain
-	/// that settles at `ceiling / peak`, so a 7.5× signal plays at full
-	/// scale and still sounds like the recording, just loud. State persists
-	/// across buffers (an export is one continuous stream) and is reset per
-	/// export by `resetLimiter()`.
+	/// This version delays the audio by the look-ahead window and derives the
+	/// gain from samples that have not been emitted yet, so the gain is
+	/// already down when the peak arrives:
+	///
+	///   gain[n] = boxcar_L( releaseSmoothed( slidingMin_2L( ceiling / |x| ) ) )
+	///   out[n]  = x[n - L] * gain[n]
+	///
+	/// Every value averaged into `gain[n]` is a minimum taken over a window
+	/// that still contains the sample being emitted, so the applied gain is
+	/// always <= the gain that sample needs and NO clamp is required. Same
+	/// measurement, same signal: 0 clipped runs, peak exactly at the ceiling,
+	/// and steady-tone THD 3.0% -> 0.2%.
+	///
+	/// The algorithm is duplicated in `LookaheadLimiter.kt` (Android export)
+	/// and `limiter.ts` (web preview); the three must stay audibly identical,
+	/// so change them together and re-run their shared fixture.
+	final class LookaheadLimiter {
+		private let ceiling: Float
+		private let lookahead: Int
+		private let releaseCoefficient: Float
+
+		private var delayLine: [Float]
+		private var delayWrite = 0
+		/// Monotonic deque over the required-gain curve; its front is the
+		/// minimum across the look-ahead window in O(1) amortized.
+		private var minIndices: [Int] = []
+		private var minValues: [Float] = []
+		private var boxcar: [Float]
+		private var boxcarWrite = 0
+		private var boxcarSum: Float
+		private var heldGain: Float = 1
+		private var sampleIndex = 0
+
+		/// - Parameters:
+		///   - ceiling: -1.0 dBFS. Sample-peak limiting does NOT bound
+		///     INTER-sample peaks — a reconstructed waveform can exceed the
+		///     sample peak by ~3 dB in the pathological case and typically
+		///     0.3-1.5 dB on real material — and a lossy encoder adds its own
+		///     overshoot on top. -1 dBFS absorbs both; hotter than that before
+		///     an AAC encode is how "limited" audio still arrives clipped.
+		///   - lookaheadMs: 4 ms — long enough to catch a transient, short
+		///     enough that the added delay is inaudible and irrelevant offline.
+		///   - releaseMs: 150 ms — slow enough not to pump on speech.
+		/// -1.0 dBFS; must match `LookaheadLimiter.CEILING` on Android.
+		static let defaultCeiling: Float = 0.891
+
+		init(sampleRate: Float, ceiling: Float = LookaheadLimiter.defaultCeiling, lookaheadMs: Float = 4, releaseMs: Float = 150) {
+			self.ceiling = ceiling
+			self.lookahead = max(2, Int(sampleRate * lookaheadMs / 1000))
+			self.releaseCoefficient = exp(-1.0 / (sampleRate * releaseMs / 1000))
+			self.delayLine = [Float](repeating: 0, count: self.lookahead)
+			self.boxcar = [Float](repeating: 1, count: self.lookahead)
+			self.boxcarSum = Float(self.lookahead)
+		}
+
+		func process(samples: UnsafeMutablePointer<Float>, count: Int) {
+			for index in 0..<count {
+				let value = samples[index].isFinite ? samples[index] : 0
+				let magnitude = abs(value)
+				let required: Float = magnitude > ceiling ? ceiling / magnitude : 1
+
+				while let last = minValues.last, last >= required {
+					minValues.removeLast()
+					minIndices.removeLast()
+				}
+				minValues.append(required)
+				minIndices.append(sampleIndex)
+				while let first = minIndices.first, first <= sampleIndex - 2 * lookahead {
+					minIndices.removeFirst()
+					minValues.removeFirst()
+				}
+				let slidingMin = minValues.first ?? 1
+
+				// Drop instantly, recover slowly. Staying <= slidingMin is what
+				// preserves the no-overshoot guarantee.
+				heldGain = slidingMin < heldGain
+					? slidingMin
+					: releaseCoefficient * heldGain + (1 - releaseCoefficient) * slidingMin
+
+				boxcarSum += heldGain - boxcar[boxcarWrite]
+				boxcar[boxcarWrite] = heldGain
+				boxcarWrite = (boxcarWrite + 1) % lookahead
+
+				let emitted = delayLine[delayWrite]
+				delayLine[delayWrite] = value
+				delayWrite = (delayWrite + 1) % lookahead
+				sampleIndex += 1
+
+				samples[index] = emitted * (boxcarSum / Float(lookahead))
+			}
+		}
+	}
+
+	/// Applies the export's limiter to one decoded float PCM buffer.
 	static func softLimit(sampleBuffer: CMSampleBuffer) {
 		guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 		var lengthAtOffset = 0
@@ -355,44 +457,27 @@ public enum EdlExporter {
 			dataPointerOut: &pointer
 		) == kCMBlockBufferNoErr, let pointer else { return }
 
-		let ceiling: Float = 0.95           // ~-0.45 dBFS, leaves AAC headroom
-		let attack: Float = 0.9985          // ~1 ms at 44.1 kHz
-		let release: Float = 0.99995        // ~150 ms
-		var observedPeak: Float = 0
 		let count = totalLength / MemoryLayout<Float>.size
+		var observedPeak: Float = 0
 
 		limiterStateLock.lock()
-		var envelope = limiterEnvelope
-		var gain = limiterGain
+		if activeLimiter == nil {
+			// 44100 matches the reader's AVSampleRateKey above. The limiter is
+			// stateful across the whole stream (an export is one continuous
+			// signal), and the sample interleaving is irrelevant to it: a peak
+			// in either channel pulls both down together, which is what keeps
+			// the stereo image from wandering under gain reduction.
+			activeLimiter = LookaheadLimiter(sampleRate: 44100)
+		}
+		let limiter = activeLimiter
 		limiterStateLock.unlock()
 
 		pointer.withMemoryRebound(to: Float.self, capacity: count) { samples in
-			for index in 0..<count {
-				let value = samples[index]
-				guard value.isFinite else { samples[index] = 0; continue }
-				let magnitude = abs(value)
-				observedPeak = max(observedPeak, magnitude)
-
-				// Envelope: jump up fast, fall back slowly.
-				envelope = magnitude > envelope
-					? attack * envelope + (1 - attack) * magnitude
-					: release * envelope + (1 - release) * magnitude
-
-				let target = envelope > ceiling ? ceiling / envelope : 1
-				gain = target < gain
-					? attack * gain + (1 - attack) * target
-					: release * gain + (1 - release) * target
-
-				let limited = value * gain
-				// Final safety for the rare inter-sample overshoot the
-				// smoothing lets through.
-				samples[index] = min(ceiling, max(-ceiling, limited))
-			}
+			for index in 0..<count { observedPeak = max(observedPeak, abs(samples[index])) }
+			limiter?.process(samples: samples, count: count)
 		}
 
 		limiterStateLock.lock()
-		limiterEnvelope = envelope
-		limiterGain = gain
 		limiterPeakSeen = max(limiterPeakSeen, observedPeak)
 		limiterBuffersSeen += 1
 		limiterStateLock.unlock()
@@ -402,18 +487,15 @@ public enum EdlExporter {
 	/// previous run would duck the first second of the next one.
 	static func resetLimiter() {
 		limiterStateLock.lock()
-		limiterEnvelope = 0
-		limiterGain = 1
+		activeLimiter = nil
 		limiterPeakSeen = 0
 		limiterBuffersSeen = 0
 		limiterStateLock.unlock()
 	}
 
-	nonisolated(unsafe) static var limiterEnvelope: Float = 0
-	nonisolated(unsafe) static var limiterGain: Float = 1
+	nonisolated(unsafe) static var activeLimiter: LookaheadLimiter?
 	static let limiterStateLock = NSLock()
 
-	/// Diagnostics: the peak the encoder would have received unlimited.
 	nonisolated(unsafe) static var limiterPeakSeen: Float = 0
 	nonisolated(unsafe) static var limiterBuffersSeen = 0
 
