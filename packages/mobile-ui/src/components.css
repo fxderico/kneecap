@@ -456,6 +456,14 @@
 	z-index: 40;
 }
 
+/* Same strip, neutral treatment — a verb that DECLINED (nothing to cut) or
+   one that finished is not an error, and the red one reads as a crash. */
+.cc-chrome-error--notice {
+	background: var(--cc-bg-raised);
+	color: var(--cc-text-primary);
+	border-color: #444;
+}
+
 /* ----------------- Aspect-ratio / Background sheets (capture) -------------- */
 .cc-sheet-title {
 	font-size: var(--cc-text-body);

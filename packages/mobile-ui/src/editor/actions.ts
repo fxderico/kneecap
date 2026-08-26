@@ -56,6 +56,19 @@ import {
 	type NativeImportProgress,
 } from "@kneecap/editor-core";
 import type { EdlAssetResolver } from "@kneecap/editor-core/edl";
+import {
+	DEFAULT_DEAD_SPACE_OPTIONS,
+	detectDeadSpace,
+	type DeadSpaceOptions,
+	type DeadSpaceRefusal,
+	type FrameFeatures,
+} from "@kneecap/editor-core/media/dead-space";
+import { getSourceDeadSpaceFeatures } from "@kneecap/editor-core/media/dead-space-analysis";
+import {
+	applyDeadSpaceCutToTracks,
+	planDeadSpaceCut,
+} from "@kneecap/editor-core/timeline/dead-space-cut";
+import { getSourceSpanAtClipTime } from "@kneecap/editor-core/retime";
 
 /**
  * The EDL asset resolver for native exports (2026-08-20, fixes the on-device
@@ -1117,3 +1130,134 @@ export function seekToSeconds({ editor, seconds }: { editor: EditorCore; seconds
 
 export { ZERO_MEDIA_TIME };
 export type { MediaTime };
+
+// ------------------------------ cut dead space ------------------------------
+
+export type DeadSpaceCutOutcome =
+	| { status: "cut"; pieces: number; removedSec: number }
+	| { status: "refused"; reason: DeadSpaceRefusal }
+	| { status: "no-source" }
+	| { status: "decode-failed" };
+
+/** Resolves the bytes to analyse for a clip, or null when it has no audio. */
+function resolveDeadSpaceSource({
+	editor,
+	element,
+}: {
+	editor: EditorCore;
+	element: TimelineElement;
+}): { sourceKey: string; file: File | null; url: string | null; durationSec?: number } | null {
+	if (element.type === "audio" && element.sourceType === "library") {
+		return { sourceKey: `library:${element.sourceUrl}`, file: null, url: element.sourceUrl };
+	}
+	if (element.type !== "video" && element.type !== "audio") return null;
+	const asset = editor.media.getAssets().find((candidate) => candidate.id === element.mediaId);
+	if (!asset) return null;
+	// `hasAudio` is only trustworthy when explicitly false — assets imported
+	// before the flag existed leave it undefined, and refusing those would
+	// disable the button on a user's whole existing library.
+	if (asset.hasAudio === false) return null;
+	return {
+		sourceKey: `media:${asset.id}`,
+		file: asset.file ?? null,
+		url: asset.url ?? null,
+		durationSec: asset.duration,
+	};
+}
+
+/**
+ * "Cut gaps" (founder, 2026-08-25: "add a button so that when i select a
+ * clip i can cut all deadspace without speech or any significant audio …
+ * the clips that it makes should be concatenated but not connected").
+ *
+ * Measures the clip's own audio (`media/dead-space.ts`), turns the kept
+ * spans into butted-but-separate elements (`timeline/dead-space-cut.ts`),
+ * and swaps the whole thing in as ONE `TracksSnapshotCommand` so a single
+ * undo puts the clip back however many pieces it became.
+ *
+ * The main track re-butts end to end afterwards — same magnetic rule as
+ * `deleteSelected`, since removing dead space IS a delete and the founder's
+ * "the 2 clips don't snap together" complaint applies identically here.
+ * Free-position tracks (overlay/audio) keep their own place: the pieces
+ * start where the clip started and the rest of that track doesn't move.
+ *
+ * Every refusal path leaves the timeline untouched and says why — a button
+ * that shreds a music bed because it found no speech in it is worse than a
+ * button that declines.
+ */
+export async function cutDeadSpace({
+	editor,
+	ref,
+	onProgress,
+	options,
+}: {
+	editor: EditorCore;
+	ref: ElementRef;
+	onProgress?: (progress: { fraction: number | null }) => void;
+	options?: Partial<DeadSpaceOptions>;
+}): Promise<DeadSpaceCutOutcome> {
+	const element = getElement({ editor, ref });
+	if (!element) return { status: "no-source" };
+	const source = resolveDeadSpaceSource({ editor, element });
+	if (!source) return { status: "no-source" };
+
+	let features: FrameFeatures;
+	try {
+		features = await getSourceDeadSpaceFeatures({
+			sourceKey: source.sourceKey,
+			file: source.file,
+			url: source.url,
+			durationSecHint: source.durationSec,
+			onProgress,
+		});
+	} catch (error) {
+		console.warn("[kneecap-dead-space] analysis failed:", error);
+		return { status: "decode-failed" };
+	}
+
+	const retime = "retime" in element ? element.retime : undefined;
+	const windowStartSec = mediaTimeToSeconds({ time: element.trimStart });
+	const analysis = detectDeadSpace({
+		features,
+		// Measure the clip's VISIBLE source window only — a floor taken from
+		// material this clip doesn't show would set the gate for footage
+		// nobody sees.
+		window: {
+			startSec: windowStartSec,
+			endSec:
+				windowStartSec +
+				getSourceSpanAtClipTime({
+					clipTime: mediaTimeToSeconds({ time: element.duration }),
+					retime,
+				}),
+		},
+		options: { ...DEFAULT_DEAD_SPACE_OPTIONS, ...options },
+	});
+	if (analysis.refusal) return { status: "refused", reason: analysis.refusal };
+
+	const pieces = planDeadSpaceCut({
+		element,
+		segments: analysis.segments,
+		fps: editor.project.getActive().settings.fps,
+	});
+	if (pieces.length === 0) {
+		return { status: "refused", reason: "would-remove-everything" };
+	}
+
+	const before = editor.scenes.getActiveScene().tracks;
+	editor.command.execute({
+		command: new TracksSnapshotCommand({
+			before,
+			after: applyDeadSpaceCutToTracks({ tracks: before, ref, pieces }),
+		}),
+	});
+	editor.selection.setSelectedElements({
+		elements: [{ trackId: ref.trackId, elementId: pieces[0].id }],
+	});
+
+	return {
+		status: "cut",
+		pieces: pieces.length,
+		removedSec: analysis.removedSec,
+	};
+}

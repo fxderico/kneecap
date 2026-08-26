@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TICKS_PER_SECOND, type EditorCore, type NativeImportProgress } from "@kneecap/editor-core";
 import { cn } from "../../lib/cn";
-import { isVisualElement, type VisualElement } from "@kneecap/editor-core/timeline";
+import { isVisualElement, type ElementRef, type VisualElement } from "@kneecap/editor-core/timeline";
 import { TopBar } from "./top-bar";
 import { PlaybackBar } from "./playback-bar";
 import { PreviewStage } from "./preview-stage";
@@ -50,8 +50,10 @@ import {
 	scrubElementTrim,
 	commitElementMove,
 	commitMainTrackReorder,
+	cutDeadSpace,
+	type DeadSpaceCutOutcome,
 } from "../../editor/actions";
-import { Scissors, Trash2, CopyPlus, SlidersHorizontal, Type, VolumeX, WandSparkles, ImagePlus } from "lucide-react";
+import { Scissors, ScissorsLineDashed, Trash2, CopyPlus, SlidersHorizontal, Type, VolumeX, WandSparkles, ImagePlus } from "lucide-react";
 import { CC_ICON_STROKE } from "../../tokens";
 import { PanelSheet } from "../panel-sheet";
 import { SheetHeader } from "../sheet-header";
@@ -91,6 +93,40 @@ const CONTEXTUAL_ITEMS: ToolbarItemDef[] = [
 	{ id: "duplicate", label: "Duplicate", icon: CopyPlus },
 	{ id: "edit", label: "Edit", icon: SlidersHorizontal },
 ];
+
+/** Round 42 (founder: "add a button so that when i select a clip i can cut
+ *  all deadspace without speech or any significant audio"): only clips that
+ *  CAN carry audio get it — offering "Cut gaps" on a sticker would be a
+ *  button that can only ever decline. */
+const CUT_GAPS_ITEM: ToolbarItemDef = { id: "cut-gaps", label: "Cut gaps", icon: ScissorsLineDashed };
+
+const AUDIBLE_ELEMENT_TYPES = new Set(["video", "audio"]);
+
+/** Human-readable outcome for the chrome strip. Every refusal names the
+ *  reason: a button that silently does nothing reads as broken. */
+function describeDeadSpaceCut({ outcome }: { outcome: DeadSpaceCutOutcome }): string {
+	switch (outcome.status) {
+		case "cut":
+			return `Cut ${outcome.pieces} clip${outcome.pieces === 1 ? "" : "s"} — ${outcome.removedSec.toFixed(1)}s of dead space removed`;
+		case "no-source":
+			return "This clip has no audio to measure.";
+		case "decode-failed":
+			return "Couldn't read this clip's audio.";
+		case "refused":
+			switch (outcome.reason) {
+				case "no-audio":
+					return "This clip's audio is silent all the way through.";
+				case "no-dynamic-range":
+					return "No clear quiet parts here — the audio never drops far enough below the rest to call it dead space.";
+				case "nothing-to-cut":
+					return "Nothing to cut — every gap here is shorter than a pause worth removing.";
+				case "too-fragmented":
+					return "That would make hundreds of tiny clips. Nothing changed.";
+				case "would-remove-everything":
+					return "That would remove almost the whole clip. Nothing changed.";
+			}
+	}
+}
 
 /** Round 22 (founder: "there should be an edit text button in the menu
  *  when i select it"): text and caption clips get a direct Edit-text verb
@@ -191,6 +227,34 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 
 	const reportChromeError = (error: unknown) => {
 		setChromeError(error instanceof Error ? error.message : String(error));
+	};
+
+	/** Neutral (non-error) chrome strip — "nothing to cut" is a RESULT, not a
+	 *  failure, and the red error treatment reads as a crash. */
+	const [chromeNotice, setChromeNotice] = useState<string | null>(null);
+	/** Non-null while a clip's audio is being decoded and measured. The first
+	 *  analysis of a long clip is seconds of silent work; without this the
+	 *  verb looks dead, exactly like the import flow did before its overlay. */
+	const [deadSpaceProgress, setDeadSpaceProgress] = useState<{
+		percent: number;
+	} | null>(null);
+
+	const runCutDeadSpace = ({ ref }: { ref: ElementRef }) => {
+		if (deadSpaceProgress) return; // one analysis at a time
+		setChromeError(null);
+		setChromeNotice(null);
+		setDeadSpaceProgress({ percent: 0 });
+		cutDeadSpace({
+			editor,
+			ref,
+			onProgress: ({ fraction }) =>
+				setDeadSpaceProgress({
+					percent: fraction === null ? 0 : Math.round(fraction * 100),
+				}),
+		})
+			.then((outcome) => setChromeNotice(describeDeadSpaceCut({ outcome })))
+			.catch(reportChromeError)
+			.finally(() => setDeadSpaceProgress(null));
 	};
 
 	/** Shared picker→custody→proxy import flow with the ProgressOverlay —
@@ -365,8 +429,22 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 				</button>
 			)}
 
+			{chromeNotice && (
+				<button
+					type="button"
+					className="cc-chrome-error cc-chrome-error--notice"
+					onClick={() => setChromeNotice(null)}
+				>
+					{chromeNotice}
+				</button>
+			)}
+
 			{importProgress && (
 				<ProgressOverlay percent={importProgress.percent} label={importProgress.label} />
+			)}
+
+			{deadSpaceProgress && (
+				<ProgressOverlay percent={deadSpaceProgress.percent} label="Listening for dead space…" />
 			)}
 
 			{selectedRef && selectedElement && (
@@ -374,7 +452,11 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 					items={
 						selectedElement.type === "text" || selectedElement.type === "caption"
 							? [EDIT_TEXT_ITEM, ...CONTEXTUAL_ITEMS]
-							: CONTEXTUAL_ITEMS
+							: AUDIBLE_ELEMENT_TYPES.has(selectedElement.type)
+								// Before "Edit": the direct verbs stay together and the
+								// sheet-opener stays last.
+								? [...CONTEXTUAL_ITEMS.slice(0, -1), CUT_GAPS_ITEM, ...CONTEXTUAL_ITEMS.slice(-1)]
+								: CONTEXTUAL_ITEMS
 					}
 					activeId={activeSheet}
 					onSelect={(id) => {
@@ -395,6 +477,10 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 							duplicateSelected({ editor, refs: [selectedRef] });
 							return;
 						}
+						if (id === "cut-gaps") {
+							runCutDeadSpace({ ref: selectedRef });
+							return;
+						}
 						setActiveSheet(id as SheetId);
 					}}
 				/>
@@ -413,6 +499,14 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 						closeSheet();
 					}}
 					onDuplicate={() => duplicateSelected({ editor, refs: [selectedRef] })}
+					onCutDeadSpace={
+						AUDIBLE_ELEMENT_TYPES.has(selectedElement.type)
+							? () => {
+									closeSheet();
+									runCutDeadSpace({ ref: selectedRef });
+								}
+							: undefined
+					}
 					onSetSpeed={({ rate, maintainPitch }) => setRetime({ editor, ref: selectedRef, rate, maintainPitch })}
 					onSetVolume={(db) => setElementParam({ editor, ref: selectedRef, key: "volume", value: db })}
 					onToggleReverse={() => toggleReversed({ editor, ref: selectedRef })}

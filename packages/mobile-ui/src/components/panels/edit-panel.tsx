@@ -1,4 +1,4 @@
-import { Copy, RotateCcw, Scissors, Trash2 } from "lucide-react";
+import { Copy, RotateCcw, Scissors, ScissorsLineDashed, Trash2 } from "lucide-react";
 import { CC_ICON_STROKE } from "../../tokens";
 import { PanelSheet } from "../panel-sheet";
 import { SheetHeader } from "../sheet-header";
@@ -16,6 +16,10 @@ interface EditPanelProps {
 	onSplit: () => void;
 	onDelete: () => void;
 	onDuplicate: () => void;
+	/** Absent for element types that can't carry audio — the row is then
+	 *  hidden rather than shown-and-disabled, matching how this panel already
+	 *  treats speed/volume/reverse on a text or sticker selection. */
+	onCutDeadSpace?: () => void;
 	onSetSpeed: (args: { rate: number; maintainPitch: boolean }) => void;
 	onSetVolume: (db: number) => void;
 	onToggleReverse: () => void;
@@ -35,6 +39,7 @@ export function EditPanel({
 	onSplit,
 	onDelete,
 	onDuplicate,
+	onCutDeadSpace,
 	onSetSpeed,
 	onSetVolume,
 	onToggleReverse,
@@ -61,6 +66,12 @@ export function EditPanel({
 					<Trash2 size={20} strokeWidth={CC_ICON_STROKE} />
 					<span>Delete</span>
 				</button>
+				{onCutDeadSpace && (
+					<button type="button" className="cc-panel-actions__btn" onClick={onCutDeadSpace}>
+						<ScissorsLineDashed size={20} strokeWidth={CC_ICON_STROKE} />
+						<span>Cut gaps</span>
+					</button>
+				)}
 			</div>
 
 			{isRetimable && (
