@@ -34,17 +34,47 @@ import { initializeGpu } from "opencut-wasm";
  *  mobile shell, the first render threw "GPU context not initialized"
  *  inside React render, and the entire app unmounted to a black screen. */
 let gpuInitPromise: Promise<boolean> | null = null;
+let gpuFailureReason: string | null = null;
+
+/** Human-readable reason the GPU compositor failed to come up (no usable
+ *  WebGPU *and* no WebGL2 fallback), or null while it hasn't been tried or
+ *  succeeded. Surfaced in the preview area so a device that can't run the
+ *  wgpu compositor shows *why* instead of the whole editor crashing on the
+ *  first compositor call (2026-08 device report: "GPU context not
+ *  initialized" thrown inside a render effect took the app to a black
+ *  screen). */
+export function getGpuFailureReason(): string | null {
+	return gpuFailureReason;
+}
+
 export function ensurePreviewGpu(): Promise<boolean> {
 	return ensureGpu();
 }
 function ensureGpu(): Promise<boolean> {
 	if (!gpuInitPromise) {
-		gpuInitPromise = initializeGpu()
-			.then(() => true)
+		let started: Promise<unknown>;
+		try {
+			started = initializeGpu();
+		} catch (error: unknown) {
+			// Defensive: a synchronous throw (bad wasm load) must not escape.
+			started = Promise.reject(error);
+		}
+		gpuInitPromise = started
+			.then(() => {
+				gpuFailureReason = null;
+				return true;
+			})
 			.catch((error: unknown) => {
-				console.warn(
-					`GPU renderer unavailable: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				const panic =
+					typeof window !== "undefined"
+						? (window as unknown as { __wasmPanic?: string }).__wasmPanic
+						: undefined;
+				const message =
+					panic ||
+					(error instanceof Error ? error.message : String(error)) ||
+					"unknown error";
+				gpuFailureReason = message;
+				console.warn(`GPU renderer unavailable: ${message}`);
 				return false;
 			});
 	}
@@ -53,14 +83,15 @@ function ensureGpu(): Promise<boolean> {
 
 export function PreviewRenderer() {
 	const editor = useEditor();
-	const [gpuReady, setGpuReady] = useState(false);
+	// null = still initializing, true = compositor ready, false = no GPU path.
+	const [gpuOk, setGpuOk] = useState<boolean | null>(null);
 
 	useEffect(() => {
 		let cancelled = false;
 		void ensureGpu().then((ok) => {
 			if (cancelled) return;
 			editor.renderer.setDegraded(!ok);
-			setGpuReady(true);
+			setGpuOk(ok);
 		});
 		return () => {
 			cancelled = true;
@@ -68,8 +99,28 @@ export function PreviewRenderer() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- editor is the process singleton.
 	}, []);
 
-	if (!gpuReady) return null;
+	if (gpuOk === null) return null;
+	// No WebGPU and no WebGL2 the compositor can use: mounting
+	// PreviewRendererInner here would call initCompositor() -> "GPU context
+	// not initialized" and unmount the whole editor. Show the reason and
+	// keep everything else (timeline, trim, text, native export) working.
+	if (!gpuOk) return <PreviewUnavailable reason={getGpuFailureReason()} />;
 	return <PreviewRendererInner />;
+}
+
+function PreviewUnavailable({ reason }: { reason: string | null }) {
+	return (
+		<div className="cc-preview-unavailable" role="status">
+			<p className="cc-preview-unavailable__title">Live preview unavailable</p>
+			<p className="cc-preview-unavailable__body">
+				This device&rsquo;s WebView didn&rsquo;t give the compositor a GPU it
+				can use (no WebGPU or WebGL2). Editing and export still work.
+			</p>
+			{reason ? (
+				<p className="cc-preview-unavailable__reason">{reason}</p>
+			) : null}
+		</div>
+	);
 }
 
 function PreviewRendererInner() {

@@ -51,21 +51,42 @@ class CrashBoundary extends Component<
 	render() {
 		if (this.state.error !== null) {
 			const err = this.state.error;
-			const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+			const name = err instanceof Error && err.name ? err.name : "Error";
+			const message = err instanceof Error ? err.message : String(err);
+			const full = `${name}: ${message}${
+				this.state.stack ? `\n\nComponent stack:${this.state.stack}` : ""
+			}`;
 			return (
-				<div className="kc-crash">
-					<p className="kc-crash__title">kneecap crashed</p>
-					<pre className="kc-crash__detail">
-						{detail}
-						{this.state.stack ? `\n${this.state.stack}` : ""}
-					</pre>
-					<button
-						type="button"
-						className="kc-home__new"
-						onClick={() => this.setState({ error: null, stack: null })}
-					>
-						Try again
-					</button>
+				<div className="kc-crash" data-kneecap-theme="capcut-mobile">
+					<div className="kc-crash__card">
+						<p className="kc-crash__title">Something went wrong</p>
+						<p className="kc-crash__lede">
+							kneecap hit an error and stopped. Your projects are saved.
+						</p>
+						<p className="kc-crash__message">{message}</p>
+						<div className="kc-crash__actions">
+							<button
+								type="button"
+								className="kc-crash__btn kc-crash__btn--primary"
+								onClick={() => window.location.reload()}
+							>
+								Reload
+							</button>
+							<button
+								type="button"
+								className="kc-crash__btn"
+								onClick={() => {
+									void navigator.clipboard?.writeText(full).catch(() => {});
+								}}
+							>
+								Copy details
+							</button>
+						</div>
+						<details className="kc-crash__details">
+							<summary>Technical details</summary>
+							<pre className="kc-crash__detail">{full}</pre>
+						</details>
+					</div>
 				</div>
 			);
 		}

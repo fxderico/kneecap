@@ -33,28 +33,95 @@ body {
 	height: 100dvh;
 	box-sizing: border-box;
 	overflow-y: auto;
-	background: #000;
-	color: #ff9c9c;
-	padding: calc(env(safe-area-inset-top, 0px) + 24px) 16px 24px;
+	background: var(--cc-bg, #0b0b0b);
+	color: var(--cc-text-primary, #f5f5f5);
+	padding: calc(env(safe-area-inset-top, 0px) + 24px)
+		calc(env(safe-area-inset-right, 0px) + 16px)
+		calc(env(safe-area-inset-bottom, 0px) + 24px)
+		calc(env(safe-area-inset-left, 0px) + 16px);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-family: var(--cc-font-family, system-ui, sans-serif);
+}
+
+.kc-crash__card {
+	width: 100%;
+	max-width: 420px;
+	background: var(--cc-surface, #1a1a1a);
+	border: 1px solid var(--cc-surface-raised, #2a2a2a);
+	border-radius: 16px;
+	padding: 20px;
 	display: flex;
 	flex-direction: column;
-	gap: 16px;
-	align-items: flex-start;
+	gap: 12px;
 }
 
 .kc-crash__title {
-	font-size: 17px;
+	font-size: 18px;
 	font-weight: 700;
 	margin: 0;
+}
+
+.kc-crash__lede {
+	margin: 0;
+	font-size: 14px;
+	line-height: 1.5;
+	opacity: 0.7;
+}
+
+.kc-crash__message {
+	margin: 0;
+	font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+	color: var(--cc-danger, #ff8f8f);
+	background: rgba(255, 92, 92, 0.08);
+	border-radius: 8px;
+	padding: 10px 12px;
+	word-break: break-word;
+}
+
+.kc-crash__actions {
+	display: flex;
+	gap: 10px;
+	margin-top: 2px;
+}
+
+.kc-crash__btn {
+	flex: 1;
+	font-family: inherit;
+	font-size: 14px;
+	font-weight: 600;
+	border: 1px solid var(--cc-surface-raised, #2a2a2a);
+	background: var(--cc-surface-raised, #262626);
+	color: var(--cc-text-primary, #f5f5f5);
+	border-radius: 10px;
+	padding: 11px 14px;
+}
+
+.kc-crash__btn--primary {
+	background: var(--cc-accent, #00cae0);
+	border-color: var(--cc-accent, #00cae0);
+	color: #001c20;
+}
+
+.kc-crash__details {
+	margin-top: 2px;
+}
+
+.kc-crash__details > summary {
+	font-size: 13px;
+	opacity: 0.6;
+	cursor: pointer;
 }
 
 .kc-crash__detail {
 	white-space: pre-wrap;
 	word-break: break-word;
 	font: 11px/1.5 ui-monospace, monospace;
-	margin: 0;
-	max-height: 60dvh;
+	margin: 10px 0 0;
+	max-height: 40dvh;
 	overflow-y: auto;
+	opacity: 0.7;
 }
 
 .kc-home {
