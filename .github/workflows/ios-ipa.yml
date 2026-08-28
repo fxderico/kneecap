@@ -40,6 +40,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags for the changelog range below
 
       - name: Install Bun
         uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
@@ -68,6 +70,23 @@ jobs:
           else
             echo "ref_name=${{ github.event.inputs.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Stamp iOS version from tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # vX.Y.Z -> X.Y.Z for CFBundleShortVersionString; run number is a
+          # monotonic CFBundleVersion so AltStore/SideStore see each tag as an
+          # update. Info.plist reads both via $(MARKETING_VERSION) /
+          # $(CURRENT_PROJECT_VERSION), defined in project.pbxproj.
+          VER="${GITHUB_REF_NAME#v}"
+          BUILD="${GITHUB_RUN_NUMBER}"
+          PBX="ios/App/App.xcodeproj/project.pbxproj"
+          sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = ${VER};/g" "$PBX"
+          sed -i '' -E "s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = ${BUILD};/g" "$PBX"
+          grep -nE 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' "$PBX"
+        working-directory: apps/mobile
 
       - name: Build unsigned .ipa
         env:
@@ -98,10 +117,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notes="Unsigned iOS \`.ipa\` — install via SideStore / AltStore (free Apple ID, 7-day re-sign). See \`docs/guides/ios-xcode-build.md\`.
-
-          Mirror: https://fede.one/opencut-ipa/"
+          # Real release notes = the tag's own annotation + the commit
+          # subjects since the previous tag. Flows straight to the
+          # fede.one/opencut-ipa "What's new" list.
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          tagmsg="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:subject)')"
+          if [ -n "$prev" ]; then
+            changes="$(git log --no-merges --pretty='- %s' "${prev}..${GITHUB_REF_NAME}")"
+          else
+            changes="$(git log --no-merges --pretty='- %s' -n 20 "${GITHUB_REF_NAME}")"
+          fi
+          notes="$(printf '%s\n\n**Changes since %s**\n%s\n\n---\nUnsigned iOS \`.ipa\` — install via SideStore / AltStore (free Apple ID, 7-day re-sign). Mirror: https://fede.one/opencut-ipa/' \
+            "${tagmsg:-kneecap ${GITHUB_REF_NAME}}" "${prev:-the start}" "$changes")"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --title "kneecap ${GITHUB_REF_NAME}" --notes "$notes"
             gh release upload "${GITHUB_REF_NAME}" release-artifacts/*.ipa release-artifacts/SHA256SUMS.txt --clobber
           else
             gh release create "${GITHUB_REF_NAME}" \
