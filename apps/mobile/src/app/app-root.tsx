@@ -35,9 +35,14 @@ const NOOP_BOOTSTRAP = async () => {};
  *  component stack on screen and logs it. */
 class CrashBoundary extends Component<
 	{ children: ReactNode },
-	{ error: unknown; stack: string | null }
+	{ error: unknown; stack: string | null; copied: boolean }
 > {
-	state: { error: unknown; stack: string | null } = { error: null, stack: null };
+	state: { error: unknown; stack: string | null; copied: boolean } = {
+		error: null,
+		stack: null,
+		copied: false,
+	};
+	private copyTimer: ReturnType<typeof setTimeout> | null = null;
 
 	static getDerivedStateFromError(error: unknown) {
 		return { error };
@@ -46,6 +51,17 @@ class CrashBoundary extends Component<
 	componentDidCatch(error: unknown, info: { componentStack?: string | null }) {
 		console.error("kneecap crashed:", error, info.componentStack);
 		this.setState({ stack: info.componentStack ?? null });
+	}
+
+	componentWillUnmount() {
+		if (this.copyTimer) clearTimeout(this.copyTimer);
+	}
+
+	private copyDetails(text: string) {
+		void navigator.clipboard?.writeText(text).catch(() => {});
+		this.setState({ copied: true });
+		if (this.copyTimer) clearTimeout(this.copyTimer);
+		this.copyTimer = setTimeout(() => this.setState({ copied: false }), 2000);
 	}
 
 	render() {
@@ -58,10 +74,11 @@ class CrashBoundary extends Component<
 			}`;
 			return (
 				<div className="kc-crash" data-kneecap-theme="capcut-mobile">
-					<div className="kc-crash__card">
+					<div className="kc-crash__card" role="alert">
 						<p className="kc-crash__title">Something went wrong</p>
 						<p className="kc-crash__lede">
-							kneecap hit an error and stopped. Your projects are saved.
+							kneecap hit an error and stopped. Your projects are saved &mdash;
+							reload to get back in.
 						</p>
 						<p className="kc-crash__message">{message}</p>
 						<div className="kc-crash__actions">
@@ -75,11 +92,9 @@ class CrashBoundary extends Component<
 							<button
 								type="button"
 								className="kc-crash__btn"
-								onClick={() => {
-									void navigator.clipboard?.writeText(full).catch(() => {});
-								}}
+								onClick={() => this.copyDetails(full)}
 							>
-								Copy details
+								{this.state.copied ? "Copied" : "Copy details"}
 							</button>
 						</div>
 						<details className="kc-crash__details">
@@ -131,7 +146,6 @@ function HomeScreen({ onOpenEditor }: { onOpenEditor: () => void }) {
 	const projects = useEditor((e) => e.project.getSavedProjects());
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const [soundCheck, setSoundCheck] = useState<string | null>(null);
 
 	useEffect(() => {
 		// Run once per mount; `editor` is the process-wide singleton and never
@@ -158,54 +172,22 @@ function HomeScreen({ onOpenEditor }: { onOpenEditor: () => void }) {
 	return (
 		<div className="kc-home" data-kneecap-theme="capcut-mobile">
 			<header className="kc-home__header">
-				<h1>kneecap</h1>
-				<div className="kc-home__header-actions">
-					{/* Dogfood diagnostics (2026-08-19 device-silence campaign): a
-					    raw 440Hz tone through the SAME AudioContext the editor
-					    uses. Audible beep = WebAudio output works and any
-					    remaining silence is in the clip pipeline; no beep = the
-					    webview's audio output itself is broken on this device.
-					    Remove before public listing. */}
-					<button
-						type="button"
-						className="kc-home__soundcheck"
-						onClick={() => {
-							const state = EditorCore.getInstance().audio.playTestTone({});
-							setSoundCheck(`web beep sent (${state})`);
-							window.setTimeout(() => setSoundCheck(null), 2500);
-						}}
-					>
-						🔊 Web
-					</button>
-					<button
-						type="button"
-						className="kc-home__soundcheck"
-						onClick={() => {
-							void getNativeBridge()
-								.then((bridge) => bridge.playTestTone())
-								.then((ok) => {
-									console.error(`[soundcheck] native tone ok=${ok}`);
-									setSoundCheck(ok ? "native beep sent" : "native tone unavailable");
-									window.setTimeout(() => setSoundCheck(null), 2500);
-								});
-						}}
-					>
-						🔊 Native
-					</button>
-					<button
-						type="button"
-						className="kc-home__new"
-						disabled={busy}
-						onClick={() => void run(() => editor.project.createNewProject({ name: nextProjectName(projects.map((p) => p.name)) }))}
-					>
-						+ New project
-					</button>
-				</div>
+				<h1 className="kc-home__wordmark">kneecap</h1>
+				<button
+					type="button"
+					className="kc-home__new"
+					disabled={busy}
+					onClick={() => void run(() => editor.project.createNewProject({ name: nextProjectName(projects.map((p) => p.name)) }))}
+				>
+					New Project
+				</button>
 			</header>
-			{soundCheck && <p className="kc-home__soundcheck-note">{soundCheck} — did you hear a beep?</p>}
-			{error && <p className="kc-home__error">{error}</p>}
+			{error && <p className="kc-home__error" role="alert">{error}</p>}
 			{projects.length === 0 ? (
-				<p className="kc-home__empty">No projects yet — tap “New project” to start editing.</p>
+				<div className="kc-home__empty">
+					<p className="kc-home__empty-title">No projects yet</p>
+					<p className="kc-home__empty-sub">Tap New Project to start editing.</p>
+				</div>
 			) : (
 				<ul className="kc-home__list">
 					{projects.map((p) => (

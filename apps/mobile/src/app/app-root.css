@@ -1,6 +1,9 @@
-/* Home (project list) screen — app-shell chrome only. The editor itself is
- * styled entirely by @kneecap/mobile-ui's tokens.css/components.css; these
- * rules lean on the same --cc-* tokens so home matches the editor theme. */
+/* Home (project list) + crash screens — app-shell chrome only. The editor
+ * itself is styled by @kneecap/mobile-ui's tokens.css/components.css; these
+ * rules lean on the same --cc-* tokens (scoped under
+ * [data-kneecap-theme="capcut-mobile"], which both roots set) so the shell
+ * matches the editor theme. Fallbacks kept so a token rename can't blank
+ * the screen. */
 
 /* The editor shell (.cc-editor-shell) sizes itself with height:100% — give
  * it a real chain to inherit from. Without this the whole editor collapses
@@ -10,11 +13,10 @@ body,
 #app {
 	height: 100%;
 	margin: 0;
-	/* This is a fixed full-screen app surface, not a document: never let
-	   the WebView page-scroll or rubber-band (on device, any layout
-	   overflow otherwise becomes a scrollable page — 2026-08-19). Screens
-	   that need scrolling own it internally (.kc-home__list,
-	   .kc-crash__detail). */
+	/* Fixed full-screen app surface, not a document: never let the WebView
+	   page-scroll or rubber-band (on device, any layout overflow otherwise
+	   becomes a scrollable page — 2026-08-19). Screens that need scrolling
+	   own it internally (.kc-home__list, .kc-crash__detail). */
 	overflow: hidden;
 	overscroll-behavior: none;
 }
@@ -24,16 +26,24 @@ body,
 body {
 	background: #000;
 	color: #f5f5f5;
-	font-family:
-		-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+	font-family: var(
+		--cc-font-ui,
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		Roboto,
+		sans-serif
+	);
 	-webkit-text-size-adjust: 100%;
 }
+
+/* ============================== Crash screen ============================== */
 
 .kc-crash {
 	height: 100dvh;
 	box-sizing: border-box;
 	overflow-y: auto;
-	background: var(--cc-bg, #0b0b0b);
+	background: var(--cc-bg-base, #000);
 	color: var(--cc-text-primary, #f5f5f5);
 	padding: calc(env(safe-area-inset-top, 0px) + 24px)
 		calc(env(safe-area-inset-right, 0px) + 16px)
@@ -42,15 +52,14 @@ body {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	font-family: var(--cc-font-family, system-ui, sans-serif);
 }
 
 .kc-crash__card {
 	width: 100%;
 	max-width: 420px;
-	background: var(--cc-surface, #1a1a1a);
-	border: 1px solid var(--cc-surface-raised, #2a2a2a);
-	border-radius: 16px;
+	background: var(--cc-bg-panel, #202020);
+	border: 1px solid var(--cc-bg-raised, #2e2e2e);
+	border-radius: var(--cc-radius-card, 16px);
 	padding: 20px;
 	display: flex;
 	flex-direction: column;
@@ -58,8 +67,9 @@ body {
 }
 
 .kc-crash__title {
-	font-size: 18px;
+	font-size: 19px;
 	font-weight: 700;
+	letter-spacing: -0.01em;
 	margin: 0;
 }
 
@@ -67,15 +77,15 @@ body {
 	margin: 0;
 	font-size: 14px;
 	line-height: 1.5;
-	opacity: 0.7;
+	color: var(--cc-text-secondary, #8b8a90);
 }
 
 .kc-crash__message {
 	margin: 0;
 	font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-	color: var(--cc-danger, #ff8f8f);
-	background: rgba(255, 92, 92, 0.08);
-	border-radius: 8px;
+	color: #ff9c9c; /* no danger token in the capcut-mobile scale */
+	background: rgba(255, 92, 92, 0.09);
+	border-radius: 10px;
 	padding: 10px 12px;
 	word-break: break-word;
 }
@@ -88,20 +98,25 @@ body {
 
 .kc-crash__btn {
 	flex: 1;
+	min-height: var(--cc-touch-target-ios, 44px);
 	font-family: inherit;
-	font-size: 14px;
+	font-size: 15px;
 	font-weight: 600;
-	border: 1px solid var(--cc-surface-raised, #2a2a2a);
-	background: var(--cc-surface-raised, #262626);
+	border: 1px solid var(--cc-bg-raised, #2e2e2e);
+	background: var(--cc-bg-raised, #2e2e2e);
 	color: var(--cc-text-primary, #f5f5f5);
-	border-radius: 10px;
+	border-radius: 12px;
 	padding: 11px 14px;
+	transition: transform 100ms ease-out;
+}
+.kc-crash__btn:active {
+	transform: scale(0.97);
 }
 
 .kc-crash__btn--primary {
 	background: var(--cc-accent, #00cae0);
 	border-color: var(--cc-accent, #00cae0);
-	color: #001c20;
+	color: var(--cc-accent-contrast, #001c20);
 }
 
 .kc-crash__details {
@@ -110,8 +125,9 @@ body {
 
 .kc-crash__details > summary {
 	font-size: 13px;
-	opacity: 0.6;
+	color: var(--cc-text-secondary, #8b8a90);
 	cursor: pointer;
+	padding: 4px 0;
 }
 
 .kc-crash__detail {
@@ -121,8 +137,10 @@ body {
 	margin: 10px 0 0;
 	max-height: 40dvh;
 	overflow-y: auto;
-	opacity: 0.7;
+	color: var(--cc-text-secondary, #8b8a90);
 }
+
+/* ================================ Home ================================= */
 
 .kc-home {
 	height: 100vh;
@@ -132,7 +150,7 @@ body {
 	   found on device 2026-08-19). The project list scrolls internally. */
 	box-sizing: border-box;
 	overflow: hidden;
-	background: var(--cc-bg, #0b0b0b);
+	background: var(--cc-bg-base, #000);
 	color: var(--cc-text-primary, #f5f5f5);
 	display: flex;
 	flex-direction: column;
@@ -141,48 +159,70 @@ body {
 		calc(env(safe-area-inset-bottom, 0px) + 16px)
 		calc(env(safe-area-inset-left, 0px) + 16px);
 	gap: 16px;
-	font-family: var(--cc-font-family, system-ui, sans-serif);
 }
 
 .kc-home__header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
+	gap: 12px;
 }
 
-.kc-home__header h1 {
-	font-size: 20px;
-	font-weight: 700;
+.kc-home__wordmark {
 	margin: 0;
+	font-size: 22px;
+	font-weight: 700;
+	letter-spacing: -0.02em; /* negative tracking as type grows (Apple §15) */
+	white-space: nowrap;
+	min-width: 0;
 }
 
 .kc-home__new {
+	flex: none;
+	white-space: nowrap;
+	min-height: var(--cc-touch-target-ios, 44px);
 	font-family: inherit;
 	background: var(--cc-accent, #00cae0);
-	color: #000;
+	color: var(--cc-accent-contrast, #001c20);
 	border: none;
-	border-radius: 8px;
-	padding: 10px 16px;
-	font-size: 14px;
-	font-weight: 600;
+	border-radius: var(--cc-radius-pill, 999px);
+	padding: 10px 18px;
+	font-size: 15px;
+	font-weight: 650;
+	transition: transform 100ms ease-out;
 }
-
+.kc-home__new:active {
+	transform: scale(0.97);
+}
 .kc-home__new:disabled {
-	opacity: 0.5;
+	opacity: 0.4;
 }
 
 .kc-home__error {
-	color: var(--cc-danger, #ff5c5c);
+	color: #ff9c9c;
 	font-size: 13px;
 	margin: 0;
 }
 
 .kc-home__empty {
-	opacity: 0.6;
-	font-size: 14px;
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
 	text-align: center;
-	margin-top: 40vh;
-	transform: translateY(-50%);
+	padding-bottom: 12dvh; /* optically centered above the true middle */
+}
+.kc-home__empty-title {
+	margin: 0;
+	font-size: 17px;
+	font-weight: 600;
+}
+.kc-home__empty-sub {
+	margin: 0;
+	font-size: 14px;
+	color: var(--cc-text-secondary, #8b8a90);
 }
 
 .kc-home__list {
@@ -203,14 +243,17 @@ body {
 	display: flex;
 	align-items: center;
 	gap: 12px;
-	background: var(--cc-surface, #1a1a1a);
+	background: var(--cc-bg-panel, #202020);
 	border: none;
-	border-radius: 10px;
+	border-radius: 12px;
 	padding: 10px;
 	color: inherit;
 	text-align: left;
+	transition: transform 100ms ease-out;
 }
-
+.kc-home__item:active {
+	transform: scale(0.985);
+}
 .kc-home__item:disabled {
 	opacity: 0.5;
 }
@@ -218,9 +261,9 @@ body {
 .kc-home__thumb {
 	width: 64px;
 	height: 40px;
-	border-radius: 6px;
+	border-radius: 8px;
 	object-fit: cover;
-	background: var(--cc-surface-raised, #262626);
+	background: var(--cc-bg-raised, #2e2e2e);
 	flex: none;
 }
 
@@ -232,7 +275,7 @@ body {
 }
 
 .kc-home__name {
-	font-size: 14px;
+	font-size: 15px;
 	font-weight: 600;
 	white-space: nowrap;
 	overflow: hidden;
@@ -241,30 +284,7 @@ body {
 
 .kc-home__date {
 	font-size: 12px;
-	opacity: 0.55;
-}
-
-.kc-home__header-actions {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-
-/* Dogfood sound-check chip (see app-root.tsx) — remove before listing. */
-.kc-home__soundcheck {
-	font-family: inherit;
-	background: var(--cc-surface, #1a1a1a);
-	color: var(--cc-text-primary, #f5f5f5);
-	border: 1px solid var(--cc-surface-raised, #262626);
-	border-radius: 8px;
-	padding: 10px 12px;
-	font-size: 13px;
-}
-
-.kc-home__soundcheck-note {
-	color: var(--cc-accent, #00cae0);
-	font-size: 13px;
-	margin: 0;
+	color: var(--cc-text-secondary, #8b8a90);
 }
 
 /* Round 21: swipe-to-delete on the project list. The row is a positioning
@@ -292,4 +312,28 @@ body {
 	font-size: 14px;
 	font-weight: 600;
 	border-radius: 0 12px 12px 0;
+}
+
+/* ===================== Accessibility preferences ====================== */
+
+@media (prefers-reduced-motion: reduce) {
+	.kc-crash__btn,
+	.kc-home__new,
+	.kc-home__item {
+		transition: none;
+	}
+	.kc-crash__btn:active,
+	.kc-home__new:active,
+	.kc-home__item:active {
+		transform: none;
+	}
+}
+
+@media (prefers-contrast: more) {
+	.kc-crash__card {
+		border-color: var(--cc-text-secondary, #8b8a90);
+	}
+	.kc-crash__btn {
+		border-color: var(--cc-text-secondary, #8b8a90);
+	}
 }

@@ -14,8 +14,12 @@
  *   3. a rAF loop renders the frame under the playhead, skipping when
  *      neither the frame index nor the tree changed (same guard as web).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+	PointerEvent as ReactPointerEvent,
+	ReactNode,
+	RefObject,
+} from "react";
 import { TICKS_PER_SECOND } from "@kneecap/editor-core";
 import { useEditor } from "@kneecap/editor-core/react";
 import { isVisualElement } from "@kneecap/editor-core/timeline";
@@ -81,6 +85,50 @@ function ensureGpu(): Promise<boolean> {
 	return gpuInitPromise;
 }
 
+/**
+ * The preview surface: the GPU-composited frame when it can run, a calm
+ * "unavailable" panel when it can't — and a local error boundary so a
+ * compositor throw (e.g. "GPU context not initialized" from a code path
+ * that slips past the gpuOk gate) degrades the *preview* instead of
+ * unmounting the whole editor. Everything outside the stage keeps working.
+ */
+export function PreviewSurface() {
+	return (
+		<PreviewBoundary>
+			<PreviewRenderer />
+		</PreviewBoundary>
+	);
+}
+
+class PreviewBoundary extends Component<
+	{ children: ReactNode },
+	{ failed: boolean; message: string | null }
+> {
+	state = { failed: false, message: null as string | null };
+
+	static getDerivedStateFromError(error: unknown) {
+		return {
+			failed: true,
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
+
+	componentDidCatch(error: unknown) {
+		console.warn("preview surface failed, degrading:", error);
+	}
+
+	render() {
+		if (this.state.failed) {
+			return (
+				<PreviewUnavailable
+					reason={this.state.message ?? getGpuFailureReason()}
+				/>
+			);
+		}
+		return this.props.children;
+	}
+}
+
 export function PreviewRenderer() {
 	const editor = useEditor();
 	// null = still initializing, true = compositor ready, false = no GPU path.
@@ -111,10 +159,19 @@ export function PreviewRenderer() {
 function PreviewUnavailable({ reason }: { reason: string | null }) {
 	return (
 		<div className="cc-preview-unavailable" role="status">
-			<p className="cc-preview-unavailable__title">Live preview unavailable</p>
+			<svg
+				className="cc-preview-unavailable__glyph"
+				viewBox="0 0 24 24"
+				aria-hidden="true"
+			>
+				<rect x="2.5" y="4.5" width="19" height="13" rx="2.5" />
+				<path d="M8.5 20.5h7M12 17.5v3" />
+				<path d="M4 4l16 14" />
+			</svg>
+			<p className="cc-preview-unavailable__title">Preview not available here</p>
 			<p className="cc-preview-unavailable__body">
-				This device&rsquo;s WebView didn&rsquo;t give the compositor a GPU it
-				can use (no WebGPU or WebGL2). Editing and export still work.
+				This device&rsquo;s WebView can&rsquo;t give the preview a GPU to draw
+				on. Editing, playback scrubbing and export all still work.
 			</p>
 			{reason ? (
 				<p className="cc-preview-unavailable__reason">{reason}</p>

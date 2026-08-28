@@ -5,7 +5,7 @@ import { isVisualElement, type ElementRef, type VisualElement } from "@kneecap/e
 import { TopBar } from "./top-bar";
 import { PlaybackBar } from "./playback-bar";
 import { PreviewStage } from "./preview-stage";
-import { PreviewRenderer } from "./preview-renderer";
+import { PreviewSurface } from "./preview-renderer";
 import { BottomToolbar } from "../bottom-toolbar";
 import { SubToolbar, type ToolbarItemDef } from "../sub-toolbar";
 import { PRIMARY_TOOLBAR_ITEMS, type PrimaryToolId } from "./toolbar-defs";
@@ -341,9 +341,10 @@ export function EditorShell({ className, onBack, bootstrap }: EditorShellProps) 
 				{/* Real frame rendering (CanvasRenderer -> wgpu compositor) —
 				    replaces the chrome-only text-span placeholder; the renderer
 				    draws text/sticker/overlay/video elements with their actual
-				    params (opacity/blendMode included), so the span's partial
-				    re-implementation of that is gone with it. */}
-				<PreviewRenderer />
+				    params (opacity/blendMode included). PreviewSurface wraps it
+				    in a local error boundary so a compositor failure degrades
+				    the preview instead of the whole editor. */}
+				<PreviewSurface />
 			</PreviewStage>
 			<PlaybackBar
 				isPlaying={isPlaying}

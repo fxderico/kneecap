@@ -440,8 +440,9 @@
 }
 
 /* Shown in place of the live compositor when the WebView exposes no GPU
-   path it can use (no WebGPU, no WebGL2). The editor stays usable — the
-   preview box just explains itself instead of the app crashing. */
+   path it can use (no WebGPU, no WebGL2), or when the compositor throws.
+   The editor stays usable — the preview box explains itself calmly rather
+   than reading as an error. */
 .cc-preview-unavailable {
 	position: absolute;
 	inset: 0;
@@ -449,28 +450,39 @@
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 6px;
+	gap: 8px;
 	padding: 24px;
 	text-align: center;
-	color: var(--cc-text-secondary, #a8a8a8);
+	color: var(--cc-text-secondary, #8b8a90);
+}
+.cc-preview-unavailable__glyph {
+	width: 30px;
+	height: 30px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	opacity: 0.7;
+	margin-bottom: 2px;
 }
 .cc-preview-unavailable__title {
 	margin: 0;
 	font-size: 14px;
 	font-weight: 600;
-	color: var(--cc-text-primary, #f0f0f0);
+	color: var(--cc-text-primary, #f5f5f5);
 }
 .cc-preview-unavailable__body {
 	margin: 0;
 	font-size: 12px;
 	line-height: 1.5;
-	max-width: 32ch;
+	max-width: 34ch;
 }
 .cc-preview-unavailable__reason {
 	margin: 4px 0 0;
 	font: 10px/1.4 ui-monospace, monospace;
-	opacity: 0.6;
-	max-width: 40ch;
+	color: var(--cc-text-disabled, rgb(139 138 144 / 60%));
+	max-width: 42ch;
 	word-break: break-word;
 }
 
