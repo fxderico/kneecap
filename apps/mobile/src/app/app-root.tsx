@@ -113,24 +113,76 @@ type Screen = { name: "home" } | { name: "editor" };
 
 function App() {
 	const [screen, setScreen] = useState<Screen>({ name: "home" });
+	const goHome = () => setScreen({ name: "home" });
 
 	if (screen.name === "editor") {
 		return (
-			<EditorShell
-				bootstrap={NOOP_BOOTSTRAP}
-				onBack={() => {
-					// Fire-and-forget save: ProjectManager.saveCurrentProject persists
-					// the active project; the home screen re-runs loadAllProjects on
-					// mount, so the refreshed metadata (name/duration/updatedAt) shows
-					// up without waiting here.
-					void EditorCore.getInstance().project.saveCurrentProject();
-					setScreen({ name: "home" });
-				}}
-			/>
+			<EditorScreenBoundary onExit={goHome}>
+				<EditorShell
+					bootstrap={NOOP_BOOTSTRAP}
+					onBack={() => {
+						// Fire-and-forget save: ProjectManager.saveCurrentProject persists
+						// the active project; the home screen re-runs loadAllProjects on
+						// mount, so the refreshed metadata (name/duration/updatedAt) shows
+						// up without waiting here.
+						void EditorCore.getInstance().project.saveCurrentProject();
+						goHome();
+					}}
+				/>
+			</EditorScreenBoundary>
 		);
 	}
 
 	return <HomeScreen onOpenEditor={() => setScreen({ name: "editor" })} />;
+}
+
+/** Editor-scoped recovery. An unhandled throw from the editor subtree —
+ *  e.g. `EditorShell`'s `getActive()` throwing "No active project" when a
+ *  project row didn't finish hydrating — drops the user back to their
+ *  project list instead of the full-screen crash boundary. */
+class EditorScreenBoundary extends Component<
+	{ children: ReactNode; onExit: () => void },
+	{ error: string | null }
+> {
+	state: { error: string | null } = { error: null };
+
+	static getDerivedStateFromError(error: unknown) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+
+	componentDidCatch(error: unknown, info: { componentStack?: string | null }) {
+		console.error("editor screen failed:", error, info.componentStack);
+	}
+
+	render() {
+		if (this.state.error !== null) {
+			return (
+				<div className="kc-crash" data-kneecap-theme="capcut-mobile">
+					<div className="kc-crash__card" role="alert">
+						<p className="kc-crash__title">Couldn&rsquo;t open this project</p>
+						<p className="kc-crash__lede">
+							It may not have finished saving last time. Your other projects
+							are fine.
+						</p>
+						<p className="kc-crash__message">{this.state.error}</p>
+						<div className="kc-crash__actions">
+							<button
+								type="button"
+								className="kc-crash__btn kc-crash__btn--primary"
+								onClick={() => {
+									this.setState({ error: null });
+									this.props.onExit();
+								}}
+							>
+								Back to projects
+							</button>
+						</div>
+					</div>
+				</div>
+			);
+		}
+		return this.props.children;
+	}
 }
 
 function HomeScreen({ onOpenEditor }: { onOpenEditor: () => void }) {
@@ -161,6 +213,10 @@ function HomeScreen({ onOpenEditor }: { onOpenEditor: () => void }) {
 		setError(null);
 		try {
 			await task();
+			// A task can resolve without leaving a usable active project (a
+			// half-saved row from a prior crash). Verify before navigating so
+			// EditorShell never mounts projectless and throws "No active project".
+			editor.project.getActive();
 			onOpenEditor();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Something went wrong");

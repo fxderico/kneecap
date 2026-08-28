@@ -60,7 +60,8 @@ pub struct GpuContext {
 impl GpuContext {
     pub async fn new() -> Result<Self, GpuError> {
         #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-        let (instance, adapter, device, queue, gl_canvas) = Self::acquire_device().await?;
+        let (instance, adapter, device, queue, gl_canvas, gl_fallback_surface) =
+            Self::acquire_device().await?;
         #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
         let (instance, adapter, device, queue) = Self::acquire_device().await?;
         let texture_format = if adapter.get_info().backend == wgpu::Backend::Gl {
@@ -181,8 +182,14 @@ impl GpuContext {
             supports_external_texture_copies,
             #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
             gl_canvas,
+            // Seed the cache with the fallback surface so the WebGL canvas is
+            // never asked for a second surface. `size: (0, 0)` forces a
+            // reconfigure to real dimensions on the first frame.
             #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-            gl_surface: RefCell::new(None),
+            gl_surface: RefCell::new(gl_fallback_surface.map(|surface| CachedCanvasSurface {
+                surface,
+                size: (0, 0),
+            })),
         })
     }
 
@@ -194,6 +201,13 @@ impl GpuContext {
             wgpu::Device,
             wgpu::Queue,
             Option<web_sys::HtmlCanvasElement>,
+            // The surface `try_gl_fallback` already created on `gl_canvas`.
+            // The WebGL backend allows exactly ONE surface per canvas for the
+            // life of its GL context (wgpu #2343 / #7480 — a second
+            // `create_surface` on the same canvas panics), so this is handed
+            // to `gl_surface` and reused for every frame instead of being
+            // dropped and re-created downstream.
+            Option<wgpu::Surface<'static>>,
         ),
         GpuError,
     > {
@@ -202,12 +216,19 @@ impl GpuContext {
         )
         .await;
 
-        match Self::try_request_device(&instance, None).await {
-            Ok((adapter, device, queue)) => return Ok((instance, adapter, device, queue, None)),
-            Err(_) => {}
+        if let Ok((adapter, device, queue)) = Self::try_request_device(&instance, None).await {
+            return Ok((instance, adapter, device, queue, None, None));
         }
-        let (gl_instance, adapter, device, queue, canvas) = Self::try_gl_fallback().await?;
-        Ok((gl_instance, adapter, device, queue, Some(canvas)))
+        let (gl_instance, adapter, device, queue, canvas, surface) =
+            Self::try_gl_fallback().await?;
+        Ok((
+            gl_instance,
+            adapter,
+            device,
+            queue,
+            Some(canvas),
+            Some(surface),
+        ))
     }
 
     #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
@@ -234,6 +255,7 @@ impl GpuContext {
             wgpu::Device,
             wgpu::Queue,
             web_sys::HtmlCanvasElement,
+            wgpu::Surface<'static>,
         ),
         GpuError,
     > {
@@ -251,11 +273,14 @@ impl GpuContext {
             .unchecked_into();
         canvas.set_width(1);
         canvas.set_height(1);
+        // The one and only surface this canvas will ever get — kept and
+        // reused (see `acquire_device`'s note and `gl_surface`), never
+        // dropped-and-remade.
         let surface = gl_instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))?;
 
         let (adapter, device, queue) =
             Self::try_request_device(&gl_instance, Some(&surface)).await?;
-        Ok((gl_instance, adapter, device, queue, canvas))
+        Ok((gl_instance, adapter, device, queue, canvas, surface))
     }
 
     #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]

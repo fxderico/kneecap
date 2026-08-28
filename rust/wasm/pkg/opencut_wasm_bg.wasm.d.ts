@@ -1,16 +1,16 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const initializeGpu: () => any;
+export const applyMaskFeather: (a: any) => [number, number, number];
 export const getCompositorCanvas: () => [number, number, number];
 export const initCompositor: (a: number, b: number) => [number, number];
+export const initializeGpu: () => any;
 export const releaseTexture: (a: number, b: number) => [number, number];
 export const renderFrame: (a: any) => [number, number];
 export const resizeCompositor: (a: number, b: number) => [number, number];
 export const uploadTexture: (a: any) => [number, number];
-export const applyEffectPasses: (a: any) => [number, number, number];
 export const getLastFrameProfile: () => any;
-export const applyMaskFeather: (a: any) => [number, number, number];
+export const applyEffectPasses: (a: any) => [number, number, number];
 export const TICKS_PER_SECOND: () => number;
 export const floorToFrame: (a: any) => any;
 export const isFrameAligned: (a: any) => number;
@@ -29,9 +29,9 @@ export const snappedSeekTime: (a: any) => any;
 export const formatTimecode: (a: any) => [number, number];
 export const guessTimecodeFormat: (a: any) => any;
 export const parseTimecode: (a: any) => any;
-export const wasm_bindgen_e463fd838255edfd___convert__closures_____invoke___wasm_bindgen_e463fd838255edfd___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_e463fd838255edfd___JsError___true_: (a: number, b: number, c: any) => [number, number];
-export const wasm_bindgen_e463fd838255edfd___convert__closures_____invoke___js_sys_cc7c71412af579c2___Function_fn_wasm_bindgen_e463fd838255edfd___JsValue_____wasm_bindgen_e463fd838255edfd___sys__Undefined___js_sys_cc7c71412af579c2___Function_fn_wasm_bindgen_e463fd838255edfd___JsValue_____wasm_bindgen_e463fd838255edfd___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-export const wasm_bindgen_e463fd838255edfd___convert__closures_____invoke___wasm_bindgen_e463fd838255edfd___JsValue______true_: (a: number, b: number, c: any) => void;
+export const wasm_bindgen_7692b21c9b00be03___convert__closures_____invoke___wasm_bindgen_7692b21c9b00be03___JsValue__core_f0fd674eaa06beef___result__Result_____wasm_bindgen_7692b21c9b00be03___JsError___true_: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen_7692b21c9b00be03___convert__closures_____invoke___js_sys_1c444856b8c4d717___Function_fn_wasm_bindgen_7692b21c9b00be03___JsValue_____wasm_bindgen_7692b21c9b00be03___sys__Undefined___js_sys_1c444856b8c4d717___Function_fn_wasm_bindgen_7692b21c9b00be03___JsValue_____wasm_bindgen_7692b21c9b00be03___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+export const wasm_bindgen_7692b21c9b00be03___convert__closures_____invoke___wasm_bindgen_7692b21c9b00be03___JsValue______true_: (a: number, b: number, c: any) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_exn_store: (a: number) => void;
