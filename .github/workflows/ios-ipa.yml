@@ -1,0 +1,111 @@
+name: iOS unsigned IPA
+
+# Builds the iOS app as an UNSIGNED device .ipa on every `v*` tag push
+# (and on manual dispatch) and attaches it to a GitHub Release. That
+# release asset is what https://fede.one/opencut-ipa/ mirrors — a timer
+# on the VPS pulls the newest release's .ipa and regenerates the landing
+# page. Signing is intentionally absent: SideStore / AltStore re-sign on
+# install with a free Apple ID (7-day re-sign). See
+# docs/guides/ios-xcode-build.md.
+#
+# Why this is separate from release.yml: that workflow's `android-release`
+# job hard-fails without the Android signing keystore secret, and its
+# `publish-release` job `needs: [android-release, ios-release]` — so it
+# cannot ship an iOS-only build. Nothing here touches release.yml; this
+# reuses apps/mobile/scripts/build-ios-unsigned-ipa.sh unchanged.
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref_name:
+        description: "Version label for the .ipa filename (no Release is published on manual runs)"
+        required: true
+        default: "v0.0.0-manual"
+
+permissions:
+  contents: write
+
+jobs:
+  ios-unsigned-ipa:
+    name: iOS (unsigned device .ipa)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.2.18
+
+      - name: Cache Bun modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.2.18-${{ hashFiles('bun.lock') }}
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Resolve version label
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "ref_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref_name=${{ github.event.inputs.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build unsigned .ipa
+        env:
+          IOS_RELEASE_REF_NAME: ${{ steps.ver.outputs.ref_name }}
+          IOS_UNSIGNED_OUT_DIR: ${{ github.workspace }}/release-artifacts
+        run: bash scripts/build-ios-unsigned-ipa.sh
+        working-directory: apps/mobile
+
+      - name: Checksums + listing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-artifacts
+          shasum -a 256 -- *.ipa | tee SHA256SUMS.txt
+          ls -la
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Publish / update GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="Unsigned iOS \`.ipa\` — install via SideStore / AltStore (free Apple ID, 7-day re-sign). See \`docs/guides/ios-xcode-build.md\`.
+
+          Mirror: https://fede.one/opencut-ipa/"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release-artifacts/*.ipa release-artifacts/SHA256SUMS.txt --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              release-artifacts/*.ipa release-artifacts/SHA256SUMS.txt \
+              --title "kneecap ${GITHUB_REF_NAME}" \
+              --notes "$notes"
+          fi
